@@ -117,6 +117,7 @@ extern unsigned int zc_split;
 #define SC0710_BOARD_UNKNOWN             0
 #define SC0710_BOARD_ELGATEO_4KP60_MK2   1
 #define SC0710_BOARD_ELGATEO_4KP         2
+#define SC0710_BOARD_ELGATO_HD60_PRO     3
 
 enum sc0710_timing_mode {
 	TIMING_MODE_MERGE = 0,           /* Use static match + dynamic fallback */
@@ -459,6 +460,7 @@ struct sc0710_dev {
 	 * kthread_dma_lock) and bails with -ENODEV, so remove can drain
 	 * in-flight holders and then tear the hardware down. */
 	bool                       disconnected;
+	bool						observational_only;
 
 	/* board details */
 	int                        nr;

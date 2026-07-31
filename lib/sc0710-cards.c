@@ -35,10 +35,13 @@ struct sc0710_board sc0710_boards[] = {
 		.name		= "Elgato 4k60 Pro MK.2",
 		.bar1_index	= 1,
 	},
-
 	[SC0710_BOARD_ELGATEO_4KP] = {
 		.name		= "Elgato 4K Pro",
 		.bar1_index	= 1,
+	},
+	[SC0710_BOARD_ELGATO_HD60_PRO] = {
+		.name           = "Elgato HD60 Pro",
+		.bar1_index     = 5,
 	},
 };
 const unsigned int sc0710_bcount = ARRAY_SIZE(sc0710_boards);
@@ -52,7 +55,11 @@ struct sc0710_subid sc0710_subids[] = {
 		.subvendor = 0x1cfa,
 		.subdevice = 0x0012,
 		.card      = SC0710_BOARD_ELGATEO_4KP,
-	}
+	}, {
+		.subvendor = 0x1cfa,
+		.subdevice = 0x0006,
+		.card      = SC0710_BOARD_ELGATO_HD60_PRO,
+	},
 };
 const unsigned int sc0710_idcount = ARRAY_SIZE(sc0710_subids);
 

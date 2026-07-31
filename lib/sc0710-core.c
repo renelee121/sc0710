@@ -878,7 +878,6 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 		(unsigned long long)pci_resource_start(pci_dev, 1),
 		(unsigned int)pci_resource_len(pci_dev, 1));
 
-	pci_set_master(pci_dev);
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(4,0,0)
 	if (!pci_dma_supported(pci_dev, 0xffffffff)) {
 #else
@@ -900,6 +899,32 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 		err = -EINVAL;
 		goto fail_disable;
 	}
+
+	if (dev->board == SC0710_BOARD_ELGATO_HD60_PRO) {
+        dev->observational_only = true;
+        pci_set_drvdata(pci_dev, dev);
+		pci_clear_master(pci_dev);
+
+        mutex_lock(&devlist);
+        list_add_tail(&dev->devlist, &sc0710_devlist);
+        mutex_unlock(&devlist);
+
+        printk(KERN_INFO
+               "%s: HD60 Pro attached in observational-only mode\n",
+               dev->name);
+        printk(KERN_INFO
+               "%s: BAR0 size=0x%llx, BAR5 size=0x%x\n",
+               dev->name,
+               (unsigned long long)pci_resource_len(pci_dev, 0),
+               dev->bar1_size);
+        printk(KERN_INFO
+               "%s: IRQ, DMA, I2C and media nodes disabled\n",
+               dev->name);
+
+        return 0;
+	}
+
+	pci_set_master(pci_dev);
 
 	/* The vendor design is pure polling and never arms the XDMA IRQ block,
 	 * but the hardware delivers MSI once the block is armed: the
@@ -1034,6 +1059,25 @@ static void sc0710_finidev(struct pci_dev *pci_dev)
 {
 	struct sc0710_dev *dev = pci_get_drvdata(pci_dev);
 	int i;
+
+	if (dev->observational_only) {
+		WRITE_ONCE(dev->disconnected, true);
+
+		mutex_lock(&devlist);
+		list_del(&dev->devlist);
+		mutex_unlock(&devlist);
+
+		sc0710_dev_unregister(dev);
+		pci_disable_device(pci_dev);
+
+		printk(KERN_INFO
+				"%s: HD60 Pro observational backend detached\n",
+				dev->name);
+
+		v4l2_device_unregister(&dev->v4l2_dev);
+		v4l2_device_put(&dev->v4l2_dev);
+		return;
+	}
 
 	if (dev->board == SC0710_BOARD_ELGATEO_4KP60_MK2) {
 		device_remove_bin_file(&pci_dev->dev, &bin_attr_hdr_tonemap);
