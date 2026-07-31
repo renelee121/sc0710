@@ -1,10 +1,61 @@
 // SPDX-License-Identifier: GPL-2.0
 
+#include <linux/debugfs.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/seq_file.h>
+#include <linux/errno.h>
 
 #include "sc0710.h"
 #include "sc0710-hd60pro.h"
+
+static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
+{
+	struct sc0710_dev *dev = s->private;
+	struct pci_dev *pci_dev = dev->pci;
+	u16 command;
+
+	pci_read_config_word(pci_dev, PCI_COMMAND, &command);
+
+	seq_printf(s, "device=%s\n", dev->name);
+	seq_printf(s, "pci=%04x:%04x\n",
+		   pci_dev->vendor, pci_dev->device);
+	seq_printf(s, "subsystem=%04x:%04x\n",
+		   pci_dev->subsystem_vendor,
+		   pci_dev->subsystem_device);
+	seq_printf(s, "bar0_size=0x%llx\n",
+		   (unsigned long long)pci_resource_len(pci_dev, 0));
+	seq_printf(s, "bar5_size=0x%llx\n",
+		   (unsigned long long)pci_resource_len(pci_dev, 5));
+	seq_printf(s, "memory_space=%u\n",
+		   !!(command & PCI_COMMAND_MEMORY));
+	seq_printf(s, "bus_master=%u\n",
+		   !!(command & PCI_COMMAND_MASTER));
+	seq_puts(s, "mode=observational-only\n");
+	seq_puts(s, "mmio_reads=disabled\n");
+	seq_puts(s, "mmio_writes=disabled\n");
+	seq_puts(s, "irq=disabled\n");
+	seq_puts(s, "dma=disabled\n");
+
+	return 0;
+}
+
+static int sc0710_hd60pro_status_open(struct inode *inode,
+				      struct file *file)
+{
+	return single_open(file,
+			   sc0710_hd60pro_status_show,
+			   inode->i_private);
+}
+
+static const struct file_operations sc0710_hd60pro_status_fops = {
+	.owner		= THIS_MODULE,
+	.open		= sc0710_hd60pro_status_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 
 int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 {
@@ -18,6 +69,26 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
          * are understood.
          */
         pci_clear_master(pci_dev);
+
+        dev->hd60pro_debugfs_dir =
+            debugfs_create_dir(dev->name, NULL);
+
+        if (IS_ERR(dev->hd60pro_debugfs_dir)) {
+            int ret = PTR_ERR(dev->hd60pro_debugfs_dir);
+
+            dev->hd60pro_debugfs_dir = NULL;
+            return ret;
+        }
+
+        if (!debugfs_create_file("status",
+                    0444,
+                    dev->hd60pro_debugfs_dir,
+                    dev,
+                    &sc0710_hd60pro_status_fops)) {
+            debugfs_remove(dev->hd60pro_debugfs_dir);
+            dev->hd60pro_debugfs_dir = NULL;
+            return -ENOMEM;
+        }
 
         printk(KERN_INFO
                "%s: HD60 Pro attached in observational-only mode\n",
@@ -36,6 +107,10 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 
 void sc0710_hd60pro_remove(struct sc0710_dev *dev)
 {
+
+        debugfs_remove(dev->hd60pro_debugfs_dir);
+        dev->hd60pro_debugfs_dir = NULL;
+
         pci_clear_master(dev->pci);
 
         printk(KERN_INFO

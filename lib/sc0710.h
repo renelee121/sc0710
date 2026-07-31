@@ -452,6 +452,8 @@ struct sc0710_audio_dev
 	struct delayed_work        silence_work;
 };
 
+struct dentry;
+
 struct sc0710_dev {
 	struct list_head           devlist;
 
@@ -461,6 +463,7 @@ struct sc0710_dev {
 	 * in-flight holders and then tear the hardware down. */
 	bool                       disconnected;
 	bool						observational_only;
+	struct dentry              *hd60pro_debugfs_dir;
 
 	/* board details */
 	int                        nr;
