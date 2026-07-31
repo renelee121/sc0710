@@ -28,6 +28,11 @@ static const struct sc0710_hd60pro_reg hd60pro_readable_regs[] = {
 		.offset = 0x0040,
 		.name = "irq_tag_observed",
 	},
+	{
+		.bar = 0,
+		.offset = 0x002c,
+		.name = "mailbox_status_observed",
+	},
 };
 
 static int
