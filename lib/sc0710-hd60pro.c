@@ -10,6 +10,107 @@
 #include "sc0710.h"
 #include "sc0710-hd60pro.h"
 
+struct sc0710_hd60pro_reg {
+	u8 bar;
+	u32 offset;
+	const char *name;
+};
+
+static const struct sc0710_hd60pro_reg hd60pro_readable_regs[] = {
+	/*
+	 * Add only offsets confirmed through Windows-driver MMIO traces.
+	 *
+	 * Example:
+	 * { .bar = 0, .offset = 0x0000, .name = "unknown_0000" },
+	 */
+};
+
+static int sc0710_hd60pro_read_reg(struct sc0710_dev *dev,
+				  const struct sc0710_hd60pro_reg *reg,
+				  u32 *value)
+{
+	void __iomem *base;
+	resource_size_t size;
+
+	switch (reg->bar) {
+	case 0:
+		base = dev->lmmio[0];
+		size = pci_resource_len(dev->pci, 0);
+		break;
+	case 5:
+		base = dev->lmmio[1];
+		size = pci_resource_len(dev->pci, 5);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (!base)
+		return -ENODEV;
+
+	if (size < sizeof(*value) ||
+	    reg->offset > size - sizeof(*value))
+		return -ERANGE;
+
+	*value = readl(base + reg->offset);
+
+	return 0;
+}
+
+static int sc0710_hd60pro_registers_show(struct seq_file *s, void *unused)
+{
+	struct sc0710_dev *dev = s->private;
+	unsigned int i;
+
+	if (!ARRAY_SIZE(hd60pro_readable_regs)) {
+		seq_puts(s, "# No MMIO registers whitelisted yet\n");
+		return 0;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(hd60pro_readable_regs); i++) {
+		const struct sc0710_hd60pro_reg *reg =
+			&hd60pro_readable_regs[i];
+		u32 value;
+		int ret;
+
+		ret = sc0710_hd60pro_read_reg(dev, reg, &value);
+		if (ret) {
+			seq_printf(s,
+				   "BAR%u[0x%08x] %-24s error=%d\n",
+				   reg->bar,
+				   reg->offset,
+				   reg->name,
+				   ret);
+			continue;
+		}
+
+		seq_printf(s,
+			   "BAR%u[0x%08x] %-24s = 0x%08x\n",
+			   reg->bar,
+			   reg->offset,
+			   reg->name,
+			   value);
+	}
+
+	return 0;
+}
+
+static int sc0710_hd60pro_registers_open(struct inode *inode,
+					 struct file *file)
+{
+	return single_open(file,
+			   sc0710_hd60pro_registers_show,
+			   inode->i_private);
+}
+
+static const struct file_operations sc0710_hd60pro_registers_fops = {
+	.owner		= THIS_MODULE,
+	.open		= sc0710_hd60pro_registers_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 {
 	struct sc0710_dev *dev = s->private;
@@ -89,6 +190,16 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
             dev->hd60pro_debugfs_dir = NULL;
             return -ENOMEM;
         }
+
+       if (!debugfs_create_file("registers",
+                     0444,
+                     dev->hd60pro_debugfs_dir,
+                     dev,
+                     &sc0710_hd60pro_registers_fops)) {
+		debugfs_remove(dev->hd60pro_debugfs_dir);
+		dev->hd60pro_debugfs_dir = NULL;
+		return -ENOMEM;
+	}
 
         printk(KERN_INFO
                "%s: HD60 Pro attached in observational-only mode\n",
