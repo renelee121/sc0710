@@ -28,6 +28,7 @@
 #include <linux/interrupt.h>
 #include <linux/sysfs.h>
 #include "sc0710.h"
+#include "sc0710-hd60pro.h"
 
 /* bin_attribute callbacks became const-qualified in Linux 6.16. */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
@@ -901,27 +902,17 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 	}
 
 	if (dev->board == SC0710_BOARD_ELGATO_HD60_PRO) {
-        dev->observational_only = true;
-        pci_set_drvdata(pci_dev, dev);
-		pci_clear_master(pci_dev);
+		err = sc0710_hd60pro_probe(dev);
+		if (err)
+			goto fail_disable;
 
-        mutex_lock(&devlist);
-        list_add_tail(&dev->devlist, &sc0710_devlist);
-        mutex_unlock(&devlist);
+		pci_set_drvdata(pci_dev, dev);
 
-        printk(KERN_INFO
-               "%s: HD60 Pro attached in observational-only mode\n",
-               dev->name);
-        printk(KERN_INFO
-               "%s: BAR0 size=0x%llx, BAR5 size=0x%x\n",
-               dev->name,
-               (unsigned long long)pci_resource_len(pci_dev, 0),
-               dev->bar1_size);
-        printk(KERN_INFO
-               "%s: IRQ, DMA, I2C and media nodes disabled\n",
-               dev->name);
+		mutex_lock(&devlist);
+		list_add_tail(&dev->devlist, &sc0710_devlist);
+		mutex_unlock(&devlist);
 
-        return 0;
+		return 0;
 	}
 
 	pci_set_master(pci_dev);
@@ -1067,12 +1058,9 @@ static void sc0710_finidev(struct pci_dev *pci_dev)
 		list_del(&dev->devlist);
 		mutex_unlock(&devlist);
 
+		sc0710_hd60pro_remove(dev);
 		sc0710_dev_unregister(dev);
 		pci_disable_device(pci_dev);
-
-		printk(KERN_INFO
-				"%s: HD60 Pro observational backend detached\n",
-				dev->name);
 
 		v4l2_device_unregister(&dev->v4l2_dev);
 		v4l2_device_put(&dev->v4l2_dev);
