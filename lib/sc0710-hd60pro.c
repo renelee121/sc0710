@@ -17,6 +17,11 @@ struct sc0710_hd60pro_reg {
 	const char *name;
 };
 
+struct hd60pro_reg8_entry {
+    u8 reg;
+    u8 value;
+};
+
 static const struct sc0710_hd60pro_reg hd60pro_readable_regs[] = {
 	{
 		.bar = 0,
@@ -152,9 +157,19 @@ static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 		!!(command & PCI_COMMAND_MEMORY));
 	seq_printf(s, "bus_master=%u\n",
 		!!(command & PCI_COMMAND_MASTER));
-	seq_puts(s, "mode=observational-only\n");
+		seq_puts(s, "mode=observational-only\n");
 	seq_puts(s, "mmio_reads=whitelist-only\n");
 	seq_puts(s, "mmio_writes=disabled\n");
+	seq_puts(s, "mailbox_protocol=reverse-engineered\n");
+	seq_puts(s, "mailbox_writes=disabled\n");
+	seq_printf(s, "signal_hdmi_hpd=%u\n",
+		   HD60PRO_SIGNAL_HDMI_HPD);
+	seq_printf(s, "signal_frontend_reset_n=%u\n",
+		   HD60PRO_SIGNAL_FRONTEND_RESET_N);
+	seq_printf(s, "video_frontend_i2c_addr_8bit=0x%02x\n",
+		   HD60PRO_I2C_VIDEO_FRONTEND_ADDR_8BIT);
+	seq_printf(s, "video_frontend_i2c_addr_7bit=0x%02x\n",
+		   HD60PRO_I2C_VIDEO_FRONTEND_ADDR_7BIT);
 	seq_puts(s, "irq=disabled\n");
 	seq_puts(s, "dma=disabled\n");
 
