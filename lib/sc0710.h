@@ -151,6 +151,16 @@ struct sc0710_subid {
 
 struct sc0710_dev;
 
+struct sc0710_hw_ops {
+	int  (*init)(struct sc0710_dev *dev);
+	void (*fini)(struct sc0710_dev *dev);
+
+	int  (*capture_prepare)(struct sc0710_dev *dev);
+	int  (*capture_start)(struct sc0710_dev *dev);
+	void (*capture_stop)(struct sc0710_dev *dev);
+	int  (*capture_service)(struct sc0710_dev *dev);
+};
+
 struct sc0710_things_per_second
 {
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(4,0,0)
@@ -469,6 +479,7 @@ struct sc0710_dev {
 	int                        nr;
 	struct mutex               lock;
 	unsigned int               board;
+	const struct sc0710_hw_ops *hw_ops;
 	char                       name[32];
 
 	/* pci stuff */

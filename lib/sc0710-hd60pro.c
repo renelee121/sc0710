@@ -394,3 +394,48 @@ void sc0710_hd60pro_remove(struct sc0710_dev *dev)
 	pr_info("%s: HD60 Pro observational backend detached\n",
 		dev->name);
 }
+
+static int
+sc0710_hd60pro_capture_unsupported(struct sc0710_dev *dev)
+{
+	if (!dev || !dev->pci)
+		return -ENODEV;
+
+	/* The passive backend must never grant the endpoint DMA ownership. */
+	pci_clear_master(dev->pci);
+
+	return -EOPNOTSUPP;
+}
+
+static void
+sc0710_hd60pro_capture_stop(struct sc0710_dev *dev)
+{
+	if (!dev || !dev->pci)
+		return;
+
+	/* Capture cannot start in this backend; preserve the safe state. */
+	pci_clear_master(dev->pci);
+}
+
+static int
+sc0710_hd60pro_capture_service(struct sc0710_dev *dev)
+{
+	if (!dev || !dev->pci)
+		return -ENODEV;
+
+	if (!dev->observational_only)
+		return -EPERM;
+
+	pci_clear_master(dev->pci);
+
+	return 0;
+}
+
+const struct sc0710_hw_ops sc0710_hd60pro_ops = {
+	.init			= sc0710_hd60pro_probe,
+	.fini			= sc0710_hd60pro_remove,
+	.capture_prepare	= sc0710_hd60pro_capture_unsupported,
+	.capture_start		= sc0710_hd60pro_capture_unsupported,
+	.capture_stop		= sc0710_hd60pro_capture_stop,
+	.capture_service	= sc0710_hd60pro_capture_service,
+};

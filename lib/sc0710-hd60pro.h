@@ -48,6 +48,11 @@ enum hd60pro_signal_index {
 	HD60PRO_SIGNAL_FRONTEND_RESET_N		= 9,
 };
 
+enum hd60pro_mcu_i2c_direction {
+	HD60PRO_MCU_I2C_WRITE = 0,
+	HD60PRO_MCU_I2C_READ  = 1,
+};
+
 /*
  * Values observed in the Windows driver.
  * They remain unused while the Linux backend is observational-only.
@@ -66,5 +71,9 @@ enum hd60pro_signal_index {
 
 int sc0710_hd60pro_probe(struct sc0710_dev *dev);
 void sc0710_hd60pro_remove(struct sc0710_dev *dev);
+
+#define HD60PRO_MCU_I2C_MAX_LENGTH		32U
+#define HD60PRO_MCU_I2C_DIRECTION_SHIFT	8U
+#define HD60PRO_MCU_I2C_LENGTH_SHIFT		16U
 
 #endif /* _SC0710_HD60PRO_H */
