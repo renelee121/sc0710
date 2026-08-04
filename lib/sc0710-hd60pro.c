@@ -1,27 +1,34 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/debugfs.h>
+#include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/seq_file.h>
+#include <linux/string.h>
+#include <linux/uaccess.h>
 
 #include "sc0710.h"
 #include "sc0710-hd60pro.h"
+
+#define HD60PRO_MAILBOX_POLL_COUNT		50U
+#define HD60PRO_MAILBOX_POLL_MIN_US		1000U
+#define HD60PRO_MAILBOX_POLL_MAX_US		1500U
+
+static bool hd60pro_experimental_mailbox;
+module_param_named(hd60pro_experimental_mailbox,
+		   hd60pro_experimental_mailbox, bool, 0400);
+MODULE_PARM_DESC(hd60pro_experimental_mailbox,
+		 "Allow one manual HD60 Pro SIGNAL_READ mailbox experiment per probe");
 
 struct sc0710_hd60pro_reg {
 	u8 bar;
 	u32 offset;
 	const char *name;
-};
-
-struct hd60pro_mailbox_snapshot {
-	u16 pci_command;
-	u32 mailbox_status;
-	u32 irq_status;
-	u32 irq_tag;
 };
 
 static const struct sc0710_hd60pro_reg hd60pro_readable_regs[] = {
@@ -104,9 +111,36 @@ sc0710_hd60pro_read_bar0(struct sc0710_dev *dev,
 }
 
 static int
+sc0710_hd60pro_write_bar0(struct sc0710_dev *dev, u32 offset, u32 value)
+{
+	resource_size_t size;
+
+	if (!dev || !dev->pci || !dev->lmmio[0])
+		return -ENODEV;
+
+	switch (offset) {
+	case HD60PRO_BAR0_MAILBOX_TRIGGER:
+	case HD60PRO_BAR0_MAILBOX_OPCODE:
+	case HD60PRO_BAR0_MAILBOX_WORD2:
+	case HD60PRO_BAR0_MAILBOX_RESPONSE0:
+	case HD60PRO_BAR0_MAILBOX_STATUS:
+		break;
+	default:
+		return -EPERM;
+	}
+
+	size = pci_resource_len(dev->pci, 0);
+	if (size < sizeof(value) || offset > size - sizeof(value))
+		return -ERANGE;
+
+	writel(value, (u8 __iomem *)dev->lmmio[0] + offset);
+	return 0;
+}
+
+static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
-	struct hd60pro_mailbox_snapshot *snapshot)
+	struct sc0710_hd60pro_mailbox_snapshot *snapshot)
 {
 	int ret;
 
@@ -190,7 +224,7 @@ static int
 sc0710_hd60pro_mailbox_snapshot_show(struct seq_file *s, void *unused)
 {
 	struct sc0710_dev *dev = s->private;
-	struct hd60pro_mailbox_snapshot snapshot;
+	struct sc0710_hd60pro_mailbox_snapshot snapshot;
 	int ret;
 
 	ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &snapshot);
@@ -243,6 +277,302 @@ sc0710_hd60pro_mailbox_snapshot_fops = {
 	.release	= single_release,
 };
 
+static void
+sc0710_hd60pro_reset_experiment_result(struct sc0710_hd60pro_state *state)
+{
+	state->in_progress = false;
+	state->completed = false;
+	state->signal_value_valid = false;
+	state->late_completion = false;
+	state->last_error = 0;
+	state->signal_index = HD60PRO_SIGNAL_HDMI_HPD;
+	state->signal_value = 0;
+	state->polls = 0;
+	state->last_poll_status = 0;
+	state->response = 0;
+	state->elapsed_ns = 0;
+	memset(&state->before, 0, sizeof(state->before));
+	memset(&state->after, 0, sizeof(state->after));
+}
+
+static int
+sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
+				   struct sc0710_hd60pro_state *state)
+{
+	int ret;
+
+	if (!READ_ONCE(hd60pro_experimental_mailbox))
+		return -EPERM;
+
+	if (!dev || !dev->pci || !state || READ_ONCE(dev->disconnected))
+		return -ENODEV;
+
+	if (dev->board != SC0710_BOARD_ELGATO_HD60_PRO ||
+	    dev->hw_ops != &sc0710_hd60pro_ops ||
+	    !dev->observational_only ||
+	    dev->pci->vendor != 0x12ab || dev->pci->device != 0x0380 ||
+	    dev->pci->subsystem_vendor != 0x1cfa ||
+	    dev->pci->subsystem_device != 0x0006)
+		return -EPERM;
+
+	if (dev->irq_requested || dev->kthread_dma || dev->kthread_hdmi)
+		return -EBUSY;
+
+	if (state->attempt_consumed)
+		return -EALREADY;
+
+	ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &state->before);
+	if (ret)
+		return ret;
+
+	state->after = state->before;
+	state->last_poll_status = state->before.mailbox_status;
+
+	if (!(state->before.pci_command & PCI_COMMAND_MEMORY))
+		return -EIO;
+
+	if (state->before.pci_command & PCI_COMMAND_MASTER) {
+		pci_clear_master(dev->pci);
+		return -EIO;
+	}
+
+	if (state->before.mailbox_status != 0 || state->before.irq_status != 0)
+		return -EBUSY;
+
+	return 0;
+}
+
+static int
+sc0710_hd60pro_run_signal_read_experiment(struct sc0710_dev *dev)
+{
+	struct sc0710_hd60pro_state *state;
+	u64 started_ns = 0;
+	u32 status = 0;
+	u32 response = 0;
+	unsigned int i;
+	int ret;
+	int snapshot_ret;
+
+	if (!dev)
+		return -ENODEV;
+
+	state = &dev->hd60pro_state;
+
+	mutex_lock(&state->mailbox_lock);
+	if (state->attempt_consumed) {
+		ret = -EALREADY;
+		goto out_preserve_result;
+	}
+
+	sc0710_hd60pro_reset_experiment_result(state);
+
+	ret = sc0710_hd60pro_validate_experiment(dev, state);
+	if (ret)
+		goto out;
+
+	/*
+	 * Consume the only active attempt before the first MMIO write. A partial
+	 * command, timeout or unexpected state must require an unload/reload.
+	 */
+	state->attempt_consumed = true;
+	state->in_progress = true;
+	started_ns = ktime_get_ns();
+
+	ret = sc0710_hd60pro_write_bar0(dev,
+					HD60PRO_BAR0_MAILBOX_STATUS, 0);
+	if (ret)
+		goto out_after_attempt;
+
+	ret = sc0710_hd60pro_write_bar0(dev,
+					HD60PRO_BAR0_MAILBOX_OPCODE,
+					HD60PRO_CMD_SIGNAL_READ);
+	if (ret)
+		goto out_after_attempt;
+
+	ret = sc0710_hd60pro_write_bar0(dev,
+					HD60PRO_BAR0_MAILBOX_WORD2,
+					BIT(HD60PRO_SIGNAL_HDMI_HPD));
+	if (ret)
+		goto out_after_attempt;
+
+	/* request[3] is explicitly zero before it becomes response word 0. */
+	ret = sc0710_hd60pro_write_bar0(dev,
+					HD60PRO_BAR0_MAILBOX_RESPONSE0, 0);
+	if (ret)
+		goto out_after_attempt;
+
+	ret = sc0710_hd60pro_write_bar0(dev,
+					HD60PRO_BAR0_MAILBOX_TRIGGER,
+					HD60PRO_MAILBOX_TRIGGER_VALUE);
+	if (ret)
+		goto out_after_attempt;
+
+	/*
+	 * writel() preserves MMIO write ordering. The first readl() also flushes
+	 * posted writes before completion is evaluated.
+	 */
+	for (i = 0; i < HD60PRO_MAILBOX_POLL_COUNT; i++) {
+		ret = sc0710_hd60pro_read_bar0(
+			dev, HD60PRO_BAR0_MAILBOX_STATUS, &status);
+		if (ret)
+			goto out_after_attempt;
+
+		state->polls = i + 1;
+		state->last_poll_status = status;
+
+		if (status & HD60PRO_MAILBOX_STATUS_COMPLETE) {
+			ret = sc0710_hd60pro_read_bar0(
+				dev, HD60PRO_BAR0_MAILBOX_RESPONSE0, &response);
+			if (ret)
+				goto out_after_attempt;
+
+			state->completed = true;
+			state->signal_value_valid = true;
+			state->response = response;
+			state->signal_value =
+				!!(response & BIT(HD60PRO_SIGNAL_HDMI_HPD));
+			ret = 0;
+			goto out_after_attempt;
+		}
+
+		usleep_range(HD60PRO_MAILBOX_POLL_MIN_US,
+			     HD60PRO_MAILBOX_POLL_MAX_US);
+	}
+
+	ret = -ETIMEDOUT;
+
+out_after_attempt:
+	state->elapsed_ns = ktime_get_ns() - started_ns;
+
+	/* Read-only after-snapshot; no clear, ACK, retry or reset is attempted. */
+	snapshot_ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &state->after);
+	if (snapshot_ret) {
+		if (!ret)
+			ret = snapshot_ret;
+	} else {
+		state->late_completion =
+			!state->completed &&
+			!!(state->after.mailbox_status &
+			   HD60PRO_MAILBOX_STATUS_COMPLETE);
+
+		if (!state->completed) {
+			if (!sc0710_hd60pro_read_bar0(
+				    dev, HD60PRO_BAR0_MAILBOX_RESPONSE0,
+				    &response))
+				state->response = response;
+		}
+
+		if (state->after.pci_command & PCI_COMMAND_MASTER) {
+			pci_clear_master(dev->pci);
+			ret = -EIO;
+		}
+
+		if (!ret && state->after.irq_status != 0)
+			ret = -EIO;
+	}
+
+out:
+	state->last_error = ret;
+	state->in_progress = false;
+out_preserve_result:
+	mutex_unlock(&state->mailbox_lock);
+	return ret;
+}
+
+static int
+sc0710_hd60pro_experimental_signal_read_show(struct seq_file *s, void *unused)
+{
+	struct sc0710_dev *dev = s->private;
+	struct sc0710_hd60pro_state *state = &dev->hd60pro_state;
+
+	mutex_lock(&state->mailbox_lock);
+
+	seq_printf(s, "enabled=%u\n",
+		   READ_ONCE(hd60pro_experimental_mailbox));
+	seq_printf(s, "attempt_consumed=%u\n", state->attempt_consumed);
+	seq_printf(s, "in_progress=%u\n", state->in_progress);
+	seq_printf(s, "completed=%u\n", state->completed);
+	seq_printf(s, "late_completion=%u\n", state->late_completion);
+	seq_printf(s, "last_error=%d\n", state->last_error);
+	seq_printf(s, "signal_index=%u\n", state->signal_index);
+	seq_puts(s, "signal_name=HDMI_HPD\n");
+	seq_printf(s, "signal_value_valid=%u\n", state->signal_value_valid);
+	seq_printf(s, "signal_value=%u\n", state->signal_value);
+	seq_printf(s, "polls=%u\n", state->polls);
+	seq_printf(s, "elapsed_us=%llu\n",
+		   (unsigned long long)(state->elapsed_ns / 1000));
+	seq_printf(s, "last_poll_status=0x%08x\n",
+		   state->last_poll_status);
+	seq_printf(s, "response=0x%08x\n", state->response);
+	seq_printf(s, "pci_command_before=0x%04x\n",
+		   state->before.pci_command);
+	seq_printf(s, "mailbox_status_before=0x%08x\n",
+		   state->before.mailbox_status);
+	seq_printf(s, "irq_status_before=0x%08x\n",
+		   state->before.irq_status);
+	seq_printf(s, "irq_tag_before=0x%08x\n",
+		   state->before.irq_tag);
+	seq_printf(s, "pci_command_after=0x%04x\n",
+		   state->after.pci_command);
+	seq_printf(s, "mailbox_status_after=0x%08x\n",
+		   state->after.mailbox_status);
+	seq_printf(s, "irq_status_after=0x%08x\n",
+		   state->after.irq_status);
+	seq_printf(s, "irq_tag_after=0x%08x\n",
+		   state->after.irq_tag);
+
+	mutex_unlock(&state->mailbox_lock);
+	return 0;
+}
+
+static int
+sc0710_hd60pro_experimental_signal_read_open(struct inode *inode,
+					     struct file *file)
+{
+	return single_open(file,
+			   sc0710_hd60pro_experimental_signal_read_show,
+			   inode->i_private);
+}
+
+static ssize_t
+sc0710_hd60pro_experimental_signal_read_write(struct file *file,
+					      const char __user *user_buf,
+					      size_t count, loff_t *ppos)
+{
+	struct seq_file *seq = file->private_data;
+	struct sc0710_dev *dev = seq->private;
+	char buf[8];
+	char *command;
+	int ret;
+
+	if (count == 0 || count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	buf[count] = '\0';
+	command = strim(buf);
+	if (strcmp(command, "1") != 0)
+		return -EINVAL;
+
+	ret = sc0710_hd60pro_run_signal_read_experiment(dev);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+static const struct file_operations
+sc0710_hd60pro_experimental_signal_read_fops = {
+	.owner		= THIS_MODULE,
+	.open		= sc0710_hd60pro_experimental_signal_read_open,
+	.read		= seq_read,
+	.write		= sc0710_hd60pro_experimental_signal_read_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 {
 	struct sc0710_dev *dev = s->private;
@@ -270,11 +600,19 @@ static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "bus_master=%u\n",
 		   !!(command & PCI_COMMAND_MASTER));
 
-	seq_puts(s, "mode=observational-only\n");
+	if (READ_ONCE(hd60pro_experimental_mailbox)) {
+		seq_puts(s, "mode=observational-with-manual-mailbox-opt-in\n");
+		seq_puts(s, "mmio_writes=experimental-manual-only\n");
+		seq_puts(s, "mailbox_writes=experimental-manual-only\n");
+	} else {
+		seq_puts(s, "mode=observational-only\n");
+		seq_puts(s, "mmio_writes=disabled\n");
+		seq_puts(s, "mailbox_writes=disabled\n");
+	}
 	seq_puts(s, "mmio_reads=whitelist-only\n");
-	seq_puts(s, "mmio_writes=disabled\n");
 	seq_puts(s, "mailbox_protocol=reverse-engineered\n");
-	seq_puts(s, "mailbox_writes=disabled\n");
+	seq_printf(s, "experimental_mailbox_opt_in=%u\n",
+		   READ_ONCE(hd60pro_experimental_mailbox));
 
 	seq_printf(s, "signal_hdmi_hpd=%u\n",
 		   HD60PRO_SIGNAL_HDMI_HPD);
@@ -317,10 +655,12 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 
 	/*
 	 * The HD60 Pro may retain DMA state across driver sessions.
-	 * Keep bus mastering disabled until its reset and DMA protocols
-	 * are understood.
+	 * Clear bus mastering before any allocation or early-return path.
 	 */
 	pci_clear_master(pci_dev);
+
+	mutex_init(&dev->hd60pro_state.mailbox_lock);
+	sc0710_hd60pro_reset_experiment_result(&dev->hd60pro_state);
 
 	dev->hd60pro_debugfs_dir =
 		debugfs_create_dir(dev->name, NULL);
@@ -365,6 +705,17 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 		goto err_debugfs;
 	}
 
+	entry = debugfs_create_file(
+				"experimental_signal_read",
+				0600,
+				dev->hd60pro_debugfs_dir,
+				dev,
+				&sc0710_hd60pro_experimental_signal_read_fops);
+	if (IS_ERR_OR_NULL(entry)) {
+		ret = entry ? PTR_ERR(entry) : -ENOMEM;
+		goto err_debugfs;
+	}
+
 	pr_info("%s: HD60 Pro attached in observational-only mode\n",
 		dev->name);
 	pr_info("%s: BAR0 size=0x%llx, BAR5 size=0x%llx\n",
@@ -374,13 +725,15 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 	pr_info("%s: whitelist MMIO reads enabled; "
 		"bus mastering, IRQ, DMA, I2C and media nodes disabled\n",
 		dev->name);
+	pr_info("%s: experimental mailbox opt-in is %s\n",
+		dev->name,
+		READ_ONCE(hd60pro_experimental_mailbox) ? "enabled" : "disabled");
 
 	return 0;
 
 err_debugfs:
 	debugfs_remove_recursive(dev->hd60pro_debugfs_dir);
 	dev->hd60pro_debugfs_dir = NULL;
-
 	return ret;
 }
 

@@ -464,6 +464,31 @@ struct sc0710_audio_dev
 
 struct dentry;
 
+struct sc0710_hd60pro_mailbox_snapshot {
+	u16 pci_command;
+	u32 mailbox_status;
+	u32 irq_status;
+	u32 irq_tag;
+};
+
+struct sc0710_hd60pro_state {
+	struct mutex mailbox_lock;
+	bool attempt_consumed;
+	bool in_progress;
+	bool completed;
+	bool signal_value_valid;
+	bool late_completion;
+	int last_error;
+	u8 signal_index;
+	u8 signal_value;
+	u8 polls;
+	u32 last_poll_status;
+	u32 response;
+	u64 elapsed_ns;
+	struct sc0710_hd60pro_mailbox_snapshot before;
+	struct sc0710_hd60pro_mailbox_snapshot after;
+};
+
 struct sc0710_dev {
 	struct list_head           devlist;
 
@@ -474,6 +499,7 @@ struct sc0710_dev {
 	bool                       disconnected;
 	bool						observational_only;
 	struct dentry              *hd60pro_debugfs_dir;
+	struct sc0710_hd60pro_state hd60pro_state;
 
 	/* board details */
 	int                        nr;
