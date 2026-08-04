@@ -4,6 +4,7 @@
 #define _SC0710_HD60PRO_H
 
 struct sc0710_dev;
+struct sc0710_hw_ops;
 
 /*
  * BAR0 mailbox and interrupt register map reconstructed from
@@ -71,6 +72,8 @@ enum hd60pro_mcu_i2c_direction {
 
 int sc0710_hd60pro_probe(struct sc0710_dev *dev);
 void sc0710_hd60pro_remove(struct sc0710_dev *dev);
+
+extern const struct sc0710_hw_ops sc0710_hd60pro_ops;
 
 #define HD60PRO_MCU_I2C_MAX_LENGTH		32U
 #define HD60PRO_MCU_I2C_DIRECTION_SHIFT	8U

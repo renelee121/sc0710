@@ -270,6 +270,51 @@ static void sc0710_shutdown(struct sc0710_dev *dev)
 	/* Power down all function blocks */
 }
 
+static int sc0710_legacy_backend_init(struct sc0710_dev *dev)
+{
+	(void)dev;
+
+	return 0;
+}
+
+static void sc0710_legacy_backend_fini(struct sc0710_dev *dev)
+{
+	(void)dev;
+}
+
+static const struct sc0710_hw_ops sc0710_legacy_ops = {
+	.init			= sc0710_legacy_backend_init,
+	.fini			= sc0710_legacy_backend_fini,
+	.capture_prepare	= sc0710_dma_channels_resize,
+	.capture_start		= sc0710_dma_channels_start,
+	.capture_stop		= sc0710_dma_channels_stop,
+	.capture_service	= sc0710_dma_channels_service,
+};
+
+static int sc0710_select_hw_ops(struct sc0710_dev *dev)
+{
+	switch (dev->pci->device) {
+	case 0x0380:
+		if (dev->board != SC0710_BOARD_ELGATO_HD60_PRO)
+			return -ENODEV;
+
+		dev->hw_ops = &sc0710_hd60pro_ops;
+		break;
+
+	case 0x0710:
+		if (dev->board == SC0710_BOARD_ELGATO_HD60_PRO)
+			return -ENODEV;
+
+		dev->hw_ops = &sc0710_legacy_ops;
+		break;
+
+	default:
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
 static int get_resources(struct sc0710_dev *dev)
 {
 	int bar1_idx = sc0710_boards[dev->board].bar1_index;
@@ -839,6 +884,7 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 	const struct pci_device_id *pci_id)
 {
 	struct sc0710_dev *dev;
+	bool backend_initialized = false;
 	int err, i;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
@@ -901,11 +947,26 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 		goto fail_disable;
 	}
 
-	if (dev->board == SC0710_BOARD_ELGATO_HD60_PRO) {
-		err = sc0710_hd60pro_probe(dev);
-		if (err)
-			goto fail_disable;
+	err = sc0710_select_hw_ops(dev);
+	if (err) {
+		printk(KERN_ERR "%s: no compatible hardware backend for PCI %04x:%04x, board %u\n",
+		       dev->name, dev->pci->vendor, dev->pci->device, dev->board);
+		goto fail_dev;
+	}
 
+	if (!dev->hw_ops || !dev->hw_ops->init || !dev->hw_ops->fini ||
+	    !dev->hw_ops->capture_prepare || !dev->hw_ops->capture_start ||
+	    !dev->hw_ops->capture_stop || !dev->hw_ops->capture_service) {
+		err = -EINVAL;
+		goto fail_dev;
+	}
+
+	err = dev->hw_ops->init(dev);
+	if (err)
+		goto fail_dev;
+	backend_initialized = true;
+
+	if (dev->observational_only) {
 		pci_set_drvdata(pci_dev, dev);
 
 		mutex_lock(&devlist);
@@ -945,7 +1006,7 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 	if (err < 0) {
 		printk(KERN_ERR "%s: card setup failed (%d), aborting probe\n",
 			dev->name, err);
-		goto fail_dev;
+		goto fail_backend;
 	}
 
 	pci_set_drvdata(pci_dev, dev);
@@ -962,7 +1023,7 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 	if (err < 0) {
 		printk(KERN_ERR "%s: DMA channel allocation failed (%d), aborting probe\n",
 			dev->name, err);
-		goto fail_dev;
+		goto fail_backend;
 	}
 
 	sc0710_i2c_initialize(dev);
@@ -981,7 +1042,7 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 			if (err < 0) {
 				printk(KERN_ERR "%s: video registration failed (%d), aborting probe\n",
 					dev->name, err);
-				goto fail_dev;
+				goto fail_backend;
 			}
 		} else if (ch->mediatype == CHTYPE_AUDIO) {
 			/* Audio is optional: video capture works without ALSA. */
@@ -1031,6 +1092,9 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 
 	return 0;
 
+fail_backend:
+	if (backend_initialized)
+		dev->hw_ops->fini(dev);
 fail_dev:
 	sc0710_dev_unregister(dev);
 fail_disable:
@@ -1058,7 +1122,7 @@ static void sc0710_finidev(struct pci_dev *pci_dev)
 		list_del(&dev->devlist);
 		mutex_unlock(&devlist);
 
-		sc0710_hd60pro_remove(dev);
+		dev->hw_ops->fini(dev);
 		sc0710_dev_unregister(dev);
 		pci_disable_device(pci_dev);
 
@@ -1145,6 +1209,7 @@ static void sc0710_finidev(struct pci_dev *pci_dev)
 	}
 
 	sc0710_shutdown(dev);
+	dev->hw_ops->fini(dev);
 
 	pci_disable_device(pci_dev);
 
