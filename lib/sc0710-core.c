@@ -756,7 +756,7 @@ static int sc0710_thread_dma_function(void *data)
 		consumed = 0;
 		mutex_lock(&dev->kthread_dma_lock);
 		if (!dev->reconfig_in_progress) {
-			consumed = sc0710_dma_channels_service(dev);
+			consumed = dev->hw_ops->capture_service(dev);
 			need_dma_resync = sc0710_dma_watchdog_check_locked(dev);
 			if (!need_dma_resync && dev->tear_resync_pending) {
 				dev->tear_resync_pending = 0;
@@ -1157,9 +1157,9 @@ static void sc0710_finidev(struct pci_dev *pci_dev)
 	mutex_lock(&dev->kthread_dma_lock);
 	WRITE_ONCE(dev->disconnected, true);
 
-	/* Stop the DMA engines explicitly rather than relying on
-	 * pci_disable_device clearing bus-master while they still run. */
-	sc0710_dma_channels_stop(dev);
+	/* Stop the active backend explicitly rather than relying on
+	 * pci_disable_device clearing bus-master while it still runs. */
+	dev->hw_ops->capture_stop(dev);
 
 	/* With the engines stopped and drained, return any zero-copy-targeted
 	 * buffers and point the chains back at the scratch ring, ahead of

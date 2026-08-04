@@ -1452,9 +1452,9 @@ static int sc0710_start_streaming(struct vb2_queue *q, unsigned int count)
 		if (READ_ONCE(dev->disconnected)) {
 			ret = -ENODEV;
 		} else {
-			ret = sc0710_dma_channels_resize(dev);
+			ret = dev->hw_ops->capture_prepare(dev);
 			if (ret == 0)
-				ret = sc0710_dma_channels_start(dev);
+				ret = dev->hw_ops->capture_start(dev);
 		}
 		mutex_unlock(&dev->kthread_dma_lock);
 		if (ret < 0) {
@@ -1502,7 +1502,7 @@ static void sc0710_stop_streaming(struct vb2_queue *q)
 		 * engines are stopped, the BARs may be unmapped): only the
 		 * software teardown below remains ours. */
 		if (!READ_ONCE(dev->disconnected)) {
-			sc0710_dma_channels_stop(dev);
+			dev->hw_ops->capture_stop(dev);
 			/* Point the chains back at the scratch ring: vb2 is
 			 * about to unmap the client's buffers, and no
 			 * descriptor may retain their DMA addresses (the stop
