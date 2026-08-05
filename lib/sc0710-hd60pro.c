@@ -18,6 +18,10 @@
 #define HD60PRO_MAILBOX_POLL_COUNT		50U
 #define HD60PRO_MAILBOX_POLL_MIN_US		1000U
 #define HD60PRO_MAILBOX_POLL_MAX_US		1500U
+#define HD60PRO_I2C_EXPERIMENT_REG_04             0x04U
+#define HD60PRO_I2C_EXPERIMENT_REG_11             0x11U
+#define HD60PRO_I2C_EXPERIMENT_REG_73             0x73U
+#define HD60PRO_I2C_EXPERIMENT_DEFAULT_REG        HD60PRO_I2C_EXPERIMENT_REG_11
 
 static bool hd60pro_experimental_mailbox;
 module_param_named(hd60pro_experimental_mailbox,
@@ -26,11 +30,6 @@ MODULE_PARM_DESC(hd60pro_experimental_mailbox,
 		 "Allow one manual HD60 Pro mailbox experiment per probe");
 
 
-static uint hd60pro_experimental_i2c_register = 0x11;
-module_param_named(hd60pro_experimental_i2c_register,
-                   hd60pro_experimental_i2c_register, uint, 0400);
-MODULE_PARM_DESC(hd60pro_experimental_i2c_register,
-                 "HD60 Pro guarded I2C_READ register: 0x04, 0x11 or 0x73");
 struct sc0710_hd60pro_reg {
 	u8 bar;
 	u32 offset;
@@ -381,7 +380,7 @@ sc0710_hd60pro_reset_i2c_result(struct sc0710_hd60pro_state *state)
 	state->i2c_in_progress = false;
 	memset(&state->i2c, 0, sizeof(state->i2c));
 	state->i2c.address_8bit = HD60PRO_I2C_VIDEO_FRONTEND_ADDR_8BIT;
-	state->i2c.reg = READ_ONCE(hd60pro_experimental_i2c_register);
+	state->i2c.reg = HD60PRO_I2C_EXPERIMENT_DEFAULT_REG;
 }
 
 static int
@@ -459,16 +458,16 @@ sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
 		dev, &state->signal.before, 0);
 }
 
-static bool sc0710_hd60pro_i2c_reg_is_whitelisted(u8 reg)
+static bool sc0710_hd60pro_i2c_reg_is_whitelisted(u32 reg)
 {
-	switch (reg) {
-	case 0x04:
-	case 0x11:
-	case 0x73:
-		return true;
-	default:
-		return false;
-	}
+        switch (reg) {
+        case HD60PRO_I2C_EXPERIMENT_REG_04:
+        case HD60PRO_I2C_EXPERIMENT_REG_11:
+        case HD60PRO_I2C_EXPERIMENT_REG_73:
+                return true;
+        default:
+                return false;
+        }
 }
 
 static int
@@ -698,19 +697,6 @@ out_preserve_result:
 	return ret;
 }
 
-static bool
-sc0710_hd60pro_i2c_register_allowed(unsigned int reg)
-{
-    switch (reg) {
-    case 0x04:
-    case 0x11:
-    case 0x73:
-        return true;
-    default:
-        return false;
-    }
-}
-
 static int
 sc0710_hd60pro_validate_i2c_experiment(
 	struct sc0710_dev *dev,
@@ -723,7 +709,7 @@ sc0710_hd60pro_validate_i2c_experiment(
 		return ret;
 
 
-	if (!sc0710_hd60pro_i2c_register_allowed(state->i2c.reg))
+	if (!sc0710_hd60pro_i2c_reg_is_whitelisted(state->i2c.reg))
 		return -EPERM;
 
 	if (state->i2c_attempt_consumed)
@@ -1018,7 +1004,10 @@ sc0710_hd60pro_experimental_i2c_read_show(struct seq_file *s, void *unused)
 	seq_printf(s, "address_8bit=0x%02x\n", state->i2c.address_8bit);
 	seq_printf(s, "address_7bit=0x%02x\n", state->i2c.address_8bit >> 1);
 	seq_printf(s, "register=0x%02x\n", state->i2c.reg);
-	seq_puts(s, "register_whitelist=0x04,0x11,0x73\n");
+	seq_printf(s, "register_whitelist=0x%02x,0x%02x,0x%02x\n",
+		   HD60PRO_I2C_EXPERIMENT_REG_04,
+		   HD60PRO_I2C_EXPERIMENT_REG_11,
+		   HD60PRO_I2C_EXPERIMENT_REG_73);
 	seq_printf(s, "value_valid=%u\n", state->i2c.value_valid);
 	seq_printf(s, "value=0x%02x\n", state->i2c.value);
 	seq_printf(s, "polls=%u\n", state->i2c.polls);
