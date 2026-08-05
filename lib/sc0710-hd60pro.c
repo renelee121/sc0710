@@ -31,16 +31,6 @@ struct sc0710_hd60pro_reg {
 	const char *name;
 };
 
-struct sc0710_hd60pro_signal_poll_result {
-	bool completed;
-	bool late_completion;
-	u8 polls;
-	u32 last_poll_status;
-	u32 response;
-	u64 elapsed_ns;
-	struct sc0710_hd60pro_mailbox_snapshot after;
-};
-
 struct sc0710_hd60pro_mailbox_request {
         u32 command;
         u32 word2;
@@ -452,11 +442,11 @@ sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
 }
 
 static int
-sc0710_hd60pro_signal_read_poll_locked(
+sc0710_hd60pro_mailbox_transaction_locked(
 	struct sc0710_dev *dev,
-	u8 signal_index,
+	const struct sc0710_hd60pro_mailbox_request *request,
 	const struct sc0710_hd60pro_mailbox_snapshot *before,
-	struct sc0710_hd60pro_signal_poll_result *result)
+	struct sc0710_hd60pro_mailbox_result *result)
 {
 	u64 started_ns;
 	u32 status = 0;
@@ -470,14 +460,21 @@ sc0710_hd60pro_signal_read_poll_locked(
 
 	memset(result, 0, sizeof(*result));
 
-	if (!dev || !before)
+	if (!dev || !request || !before)
 		return -EINVAL;
 
 	result->after = *before;
 	result->last_poll_status = before->mailbox_status;
 
-	/* Keep the transport restricted to the single signal proven in G1-A. */
-	if (signal_index != HD60PRO_SIGNAL_HDMI_HPD)
+	/*
+	 * G1-D remains deliberately restricted to the single command and
+	 * argument proven on hardware in G1-A. The transaction shape is reusable,
+	 * but its accepted protocol surface is not widened yet.
+	 */
+	if (request->command != HD60PRO_CMD_SIGNAL_READ)
+		return -EOPNOTSUPP;
+
+	if (request->word2 != BIT(HD60PRO_SIGNAL_HDMI_HPD))
 		return -EPERM;
 
 	started_ns = ktime_get_ns();
@@ -489,13 +486,13 @@ sc0710_hd60pro_signal_read_poll_locked(
 
 	ret = sc0710_hd60pro_write_bar0(dev,
 					HD60PRO_BAR0_MAILBOX_OPCODE,
-					HD60PRO_CMD_SIGNAL_READ);
+					request->command);
 	if (ret)
 		goto out;
 
 	ret = sc0710_hd60pro_write_bar0(dev,
 					HD60PRO_BAR0_MAILBOX_WORD2,
-					BIT(signal_index));
+					request->word2);
 	if (ret)
 		goto out;
 
@@ -576,9 +573,29 @@ out:
 }
 
 static int
+sc0710_hd60pro_signal_read_poll_locked(
+	struct sc0710_dev *dev,
+	u8 signal_index,
+	const struct sc0710_hd60pro_mailbox_snapshot *before,
+	struct sc0710_hd60pro_mailbox_result *result)
+{
+	const struct sc0710_hd60pro_mailbox_request request = {
+		.command = HD60PRO_CMD_SIGNAL_READ,
+		.word2 = BIT(HD60PRO_SIGNAL_HDMI_HPD),
+	};
+
+	/* Keep the semantic wrapper restricted to the signal proven in G1-A. */
+	if (signal_index != HD60PRO_SIGNAL_HDMI_HPD)
+		return -EPERM;
+
+	return sc0710_hd60pro_mailbox_transaction_locked(
+		dev, &request, before, result);
+}
+
+static int
 sc0710_hd60pro_run_signal_read_experiment(struct sc0710_dev *dev)
 {
-	struct sc0710_hd60pro_signal_poll_result result;
+	struct sc0710_hd60pro_mailbox_result result;
 	struct sc0710_hd60pro_state *state;
 	int ret;
 
