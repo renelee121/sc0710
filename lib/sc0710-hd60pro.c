@@ -32,8 +32,10 @@ struct sc0710_hd60pro_reg {
 };
 
 struct sc0710_hd60pro_mailbox_request {
-        u32 command;
-        u32 word2;
+	u32 command;
+	u32 word2;
+	u32 word3;
+	u32 response_offset;
 };
 
 struct sc0710_hd60pro_mailbox_result {
@@ -142,6 +144,7 @@ sc0710_hd60pro_write_bar0(struct sc0710_dev *dev, u32 offset, u32 value)
 	case HD60PRO_BAR0_MAILBOX_OPCODE:
 	case HD60PRO_BAR0_MAILBOX_WORD2:
 	case HD60PRO_BAR0_MAILBOX_RESPONSE0:
+	case HD60PRO_BAR0_MAILBOX_RESPONSE1:
 	case HD60PRO_BAR0_MAILBOX_STATUS:
 		break;
 	default:
@@ -366,6 +369,15 @@ sc0710_hd60pro_reset_clear_result(struct sc0710_hd60pro_state *state)
 	memset(&state->clear.after, 0, sizeof(state->clear.after));
 }
 
+static void
+sc0710_hd60pro_reset_i2c_result(struct sc0710_hd60pro_state *state)
+{
+	state->i2c_in_progress = false;
+	memset(&state->i2c, 0, sizeof(state->i2c));
+	state->i2c.address_8bit = HD60PRO_I2C_VIDEO_FRONTEND_ADDR_8BIT;
+	state->i2c.reg = 0x11;
+}
+
 static int
 sc0710_hd60pro_validate_manual_context_locked(
 	struct sc0710_dev *dev,
@@ -427,7 +439,7 @@ sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
 	if (state->attempt_consumed)
 		return -EALREADY;
 
-	if (state->clear_attempt_consumed)
+	if (state->clear_attempt_consumed || state->i2c_attempt_consumed)
 		return -EBUSY;
 
 	ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &state->signal.before);
@@ -467,15 +479,25 @@ sc0710_hd60pro_mailbox_transaction_locked(
 	result->last_poll_status = before->mailbox_status;
 
 	/*
-	 * G1-D remains deliberately restricted to the single command and
-	 * argument proven on hardware in G1-A. The transaction shape is reusable,
-	 * but its accepted protocol surface is not widened yet.
+	 * Keep the active protocol surface restricted to transactions recovered
+	 * from the Windows driver and explicitly selected for one-shot testing.
 	 */
-	if (request->command != HD60PRO_CMD_SIGNAL_READ)
+	switch (request->command) {
+	case HD60PRO_CMD_SIGNAL_READ:
+		if (request->word2 != BIT(HD60PRO_SIGNAL_HDMI_HPD) ||
+		    request->word3 != 0 ||
+		    request->response_offset != HD60PRO_BAR0_MAILBOX_RESPONSE0)
+			return -EPERM;
+		break;
+	case HD60PRO_CMD_I2C_READ_REG8:
+		if (request->word2 != HD60PRO_I2C_VIDEO_FRONTEND_ADDR_8BIT ||
+		    request->word3 != 0x11 ||
+		    request->response_offset != HD60PRO_BAR0_MAILBOX_RESPONSE1)
+			return -EPERM;
+		break;
+	default:
 		return -EOPNOTSUPP;
-
-	if (request->word2 != BIT(HD60PRO_SIGNAL_HDMI_HPD))
-		return -EPERM;
+	}
 
 	started_ns = ktime_get_ns();
 
@@ -496,11 +518,18 @@ sc0710_hd60pro_mailbox_transaction_locked(
 	if (ret)
 		goto out;
 
-	/* request[3] is explicitly zero before it becomes response word 0. */
 	ret = sc0710_hd60pro_write_bar0(dev,
-					HD60PRO_BAR0_MAILBOX_RESPONSE0, 0);
+					HD60PRO_BAR0_MAILBOX_RESPONSE0,
+					request->word3);
 	if (ret)
 		goto out;
+
+	if (request->response_offset == HD60PRO_BAR0_MAILBOX_RESPONSE1) {
+		ret = sc0710_hd60pro_write_bar0(
+			dev, HD60PRO_BAR0_MAILBOX_RESPONSE1, 0);
+		if (ret)
+			goto out;
+	}
 
 	ret = sc0710_hd60pro_write_bar0(dev,
 					HD60PRO_BAR0_MAILBOX_TRIGGER,
@@ -523,7 +552,7 @@ sc0710_hd60pro_mailbox_transaction_locked(
 
 		if (status & HD60PRO_MAILBOX_STATUS_COMPLETE) {
 			ret = sc0710_hd60pro_read_bar0(
-				dev, HD60PRO_BAR0_MAILBOX_RESPONSE0, &response);
+				dev, request->response_offset, &response);
 			if (ret)
 				goto out;
 
@@ -555,7 +584,7 @@ out:
 
 		if (!result->completed) {
 			if (!sc0710_hd60pro_read_bar0(
-				    dev, HD60PRO_BAR0_MAILBOX_RESPONSE0,
+				    dev, request->response_offset,
 				    &response))
 				result->response = response;
 		}
@@ -582,6 +611,8 @@ sc0710_hd60pro_signal_read_poll_locked(
 	const struct sc0710_hd60pro_mailbox_request request = {
 		.command = HD60PRO_CMD_SIGNAL_READ,
 		.word2 = BIT(HD60PRO_SIGNAL_HDMI_HPD),
+		.word3 = 0,
+		.response_offset = HD60PRO_BAR0_MAILBOX_RESPONSE0,
 	};
 
 	/* Keep the semantic wrapper restricted to the signal proven in G1-A. */
@@ -649,6 +680,88 @@ out_preserve_result:
 }
 
 static int
+sc0710_hd60pro_validate_i2c_experiment(
+	struct sc0710_dev *dev,
+	struct sc0710_hd60pro_state *state)
+{
+	int ret;
+
+	ret = sc0710_hd60pro_validate_manual_context_locked(dev, state);
+	if (ret)
+		return ret;
+
+	if (state->i2c_attempt_consumed)
+		return -EALREADY;
+
+	if (state->attempt_consumed || state->clear_attempt_consumed)
+		return -EBUSY;
+
+	ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &state->i2c.before);
+	if (ret)
+		return ret;
+
+	state->i2c.after = state->i2c.before;
+	state->i2c.last_poll_status = state->i2c.before.mailbox_status;
+
+	return sc0710_hd60pro_validate_mailbox_snapshot_locked(
+		dev, &state->i2c.before, 0);
+}
+
+static int
+sc0710_hd60pro_run_i2c_read_experiment(struct sc0710_dev *dev)
+{
+	const struct sc0710_hd60pro_mailbox_request request = {
+		.command = HD60PRO_CMD_I2C_READ_REG8,
+		.word2 = HD60PRO_I2C_VIDEO_FRONTEND_ADDR_8BIT,
+		.word3 = 0x11,
+		.response_offset = HD60PRO_BAR0_MAILBOX_RESPONSE1,
+	};
+	struct sc0710_hd60pro_mailbox_result result;
+	struct sc0710_hd60pro_state *state;
+	int ret;
+
+	if (!dev)
+		return -ENODEV;
+
+	state = &dev->hd60pro_state;
+
+	mutex_lock(&state->mailbox_lock);
+	if (state->i2c_attempt_consumed) {
+		ret = -EALREADY;
+		goto out_preserve_result;
+	}
+
+	sc0710_hd60pro_reset_i2c_result(state);
+
+	ret = sc0710_hd60pro_validate_i2c_experiment(dev, state);
+	if (ret)
+		goto out;
+
+	state->i2c_attempt_consumed = true;
+	state->i2c_in_progress = true;
+
+	ret = sc0710_hd60pro_mailbox_transaction_locked(
+		dev, &request, &state->i2c.before, &result);
+
+	state->i2c.completed = result.completed;
+	state->i2c.value_valid = result.completed;
+	state->i2c.late_completion = result.late_completion;
+	state->i2c.value = result.response & 0xff;
+	state->i2c.polls = result.polls;
+	state->i2c.last_poll_status = result.last_poll_status;
+	state->i2c.response = result.response;
+	state->i2c.elapsed_ns = result.elapsed_ns;
+	state->i2c.after = result.after;
+
+out:
+	state->i2c.last_error = ret;
+	state->i2c_in_progress = false;
+out_preserve_result:
+	mutex_unlock(&state->mailbox_lock);
+	return ret;
+}
+
+static int
 sc0710_hd60pro_validate_clear_experiment(
 	struct sc0710_dev *dev,
 	struct sc0710_hd60pro_state *state)
@@ -662,7 +775,7 @@ sc0710_hd60pro_validate_clear_experiment(
 	if (state->clear_attempt_consumed)
 		return -EALREADY;
 
-	if (state->attempt_consumed)
+	if (state->attempt_consumed || state->i2c_attempt_consumed)
 		return -EBUSY;
 
 	ret = sc0710_hd60pro_take_mailbox_snapshot(
@@ -852,6 +965,101 @@ sc0710_hd60pro_experimental_mailbox_clear_fops = {
 };
 
 static int
+sc0710_hd60pro_experimental_i2c_read_show(struct seq_file *s, void *unused)
+{
+	struct sc0710_dev *dev = s->private;
+	struct sc0710_hd60pro_state *state = &dev->hd60pro_state;
+
+	mutex_lock(&state->mailbox_lock);
+
+	seq_printf(s, "enabled=%u\n",
+		   READ_ONCE(hd60pro_experimental_mailbox));
+	seq_printf(s, "attempt_consumed=%u\n", state->i2c_attempt_consumed);
+	seq_printf(s, "in_progress=%u\n", state->i2c_in_progress);
+	seq_printf(s, "completed=%u\n", state->i2c.completed);
+	seq_printf(s, "late_completion=%u\n", state->i2c.late_completion);
+	seq_printf(s, "last_error=%d\n", state->i2c.last_error);
+	seq_printf(s, "address_8bit=0x%02x\n", state->i2c.address_8bit);
+	seq_printf(s, "address_7bit=0x%02x\n", state->i2c.address_8bit >> 1);
+	seq_printf(s, "register=0x%02x\n", state->i2c.reg);
+	seq_printf(s, "value_valid=%u\n", state->i2c.value_valid);
+	seq_printf(s, "value=0x%02x\n", state->i2c.value);
+	seq_printf(s, "polls=%u\n", state->i2c.polls);
+	seq_printf(s, "elapsed_us=%llu\n",
+		   (unsigned long long)(state->i2c.elapsed_ns / 1000));
+	seq_printf(s, "last_poll_status=0x%08x\n",
+		   state->i2c.last_poll_status);
+	seq_printf(s, "response_word4=0x%08x\n", state->i2c.response);
+	seq_printf(s, "pci_command_before=0x%04x\n",
+		   state->i2c.before.pci_command);
+	seq_printf(s, "mailbox_status_before=0x%08x\n",
+		   state->i2c.before.mailbox_status);
+	seq_printf(s, "irq_status_before=0x%08x\n",
+		   state->i2c.before.irq_status);
+	seq_printf(s, "irq_tag_before=0x%08x\n",
+		   state->i2c.before.irq_tag);
+	seq_printf(s, "pci_command_after=0x%04x\n",
+		   state->i2c.after.pci_command);
+	seq_printf(s, "mailbox_status_after=0x%08x\n",
+		   state->i2c.after.mailbox_status);
+	seq_printf(s, "irq_status_after=0x%08x\n",
+		   state->i2c.after.irq_status);
+	seq_printf(s, "irq_tag_after=0x%08x\n",
+		   state->i2c.after.irq_tag);
+
+	mutex_unlock(&state->mailbox_lock);
+	return 0;
+}
+
+static int
+sc0710_hd60pro_experimental_i2c_read_open(struct inode *inode,
+					  struct file *file)
+{
+	return single_open(file,
+			   sc0710_hd60pro_experimental_i2c_read_show,
+			   inode->i_private);
+}
+
+static ssize_t
+sc0710_hd60pro_experimental_i2c_read_write(struct file *file,
+					   const char __user *user_buf,
+					   size_t count, loff_t *ppos)
+{
+	struct seq_file *seq = file->private_data;
+	struct sc0710_dev *dev = seq->private;
+	char buf[8];
+	char *command;
+	int ret;
+
+	if (count == 0 || count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	buf[count] = '\0';
+	command = strim(buf);
+	if (strcmp(command, "1") != 0)
+		return -EINVAL;
+
+	ret = sc0710_hd60pro_run_i2c_read_experiment(dev);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+static const struct file_operations
+sc0710_hd60pro_experimental_i2c_read_fops = {
+	.owner		= THIS_MODULE,
+	.open		= sc0710_hd60pro_experimental_i2c_read_open,
+	.read		= seq_read,
+	.write		= sc0710_hd60pro_experimental_i2c_read_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int
 sc0710_hd60pro_experimental_signal_read_show(struct seq_file *s, void *unused)
 {
 	struct sc0710_dev *dev = s->private;
@@ -984,11 +1192,14 @@ static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 		seq_puts(s, "mode=observational-with-manual-mailbox-opt-in\n");
 		seq_puts(s, "mmio_writes=experimental-manual-only\n");
 		seq_puts(s, "mailbox_writes=experimental-manual-only\n");
+		seq_puts(s, "i2c_reads=experimental-manual-only\n");
 	} else {
 		seq_puts(s, "mode=observational-only\n");
 		seq_puts(s, "mmio_writes=disabled\n");
 		seq_puts(s, "mailbox_writes=disabled\n");
+		seq_puts(s, "i2c_reads=disabled\n");
 	}
+	seq_puts(s, "i2c_writes=disabled\n");
 	seq_puts(s, "mmio_reads=whitelist-only\n");
 	seq_puts(s, "mailbox_protocol=reverse-engineered\n");
 	seq_printf(s, "experimental_mailbox_opt_in=%u\n",
@@ -1043,6 +1254,7 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 	mutex_init(&dev->hd60pro_state.mailbox_lock);
 	sc0710_hd60pro_reset_experiment_result(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_clear_result(&dev->hd60pro_state);
+	sc0710_hd60pro_reset_i2c_result(&dev->hd60pro_state);
 
 	dev->hd60pro_debugfs_dir =
 		debugfs_create_dir(dev->name, NULL);
@@ -1099,6 +1311,17 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 	}
 
 	entry = debugfs_create_file(
+				"experimental_i2c_read",
+				0600,
+				dev->hd60pro_debugfs_dir,
+				dev,
+				&sc0710_hd60pro_experimental_i2c_read_fops);
+	if (IS_ERR_OR_NULL(entry)) {
+		ret = entry ? PTR_ERR(entry) : -ENOMEM;
+		goto err_debugfs;
+	}
+
+	entry = debugfs_create_file(
 				"experimental_signal_read",
 				0600,
 				dev->hd60pro_debugfs_dir,
@@ -1116,7 +1339,7 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 		(unsigned long long)pci_resource_len(pci_dev, 0),
 		(unsigned long long)pci_resource_len(pci_dev, 5));
 	pr_info("%s: whitelist MMIO reads enabled; "
-		"bus mastering, IRQ, DMA, I2C and media nodes disabled\n",
+		"bus mastering, IRQ, DMA, I2C writes and media nodes disabled\n",
 		dev->name);
 	pr_info("%s: experimental mailbox opt-in is %s\n",
 		dev->name,

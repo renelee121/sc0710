@@ -494,6 +494,22 @@ struct sc0710_hd60pro_clear_result {
 	struct sc0710_hd60pro_mailbox_snapshot after;
 };
 
+struct sc0710_hd60pro_i2c_result {
+	bool completed;
+	bool value_valid;
+	bool late_completion;
+	int last_error;
+	u8 address_8bit;
+	u8 reg;
+	u8 value;
+	u32 polls;
+	u32 last_poll_status;
+	u32 response;
+	u64 elapsed_ns;
+	struct sc0710_hd60pro_mailbox_snapshot before;
+	struct sc0710_hd60pro_mailbox_snapshot after;
+};
+
 struct sc0710_hd60pro_state {
 	struct mutex mailbox_lock;
 	bool attempt_consumed;
@@ -503,6 +519,10 @@ struct sc0710_hd60pro_state {
 	bool clear_attempt_consumed;
 	bool clear_in_progress;
 	struct sc0710_hd60pro_clear_result clear;
+
+	bool i2c_attempt_consumed;
+	bool i2c_in_progress;
+	struct sc0710_hd60pro_i2c_result i2c;
 };
 
 struct sc0710_dev {
