@@ -41,6 +41,25 @@ struct sc0710_hd60pro_signal_poll_result {
 	struct sc0710_hd60pro_mailbox_snapshot after;
 };
 
+struct sc0710_hd60pro_mailbox_request {
+        u32 command;
+        u32 word2;
+};
+
+struct sc0710_hd60pro_mailbox_result {
+        bool completed;
+        bool late_completion;
+
+        u32 response;
+
+        u32 polls;
+        u32 last_poll_status;
+
+        u64 elapsed_ns;
+
+        struct sc0710_hd60pro_mailbox_snapshot after;
+};
+
 static const struct sc0710_hd60pro_reg hd60pro_readable_regs[] = {
 	{
 		.bar = 0,
