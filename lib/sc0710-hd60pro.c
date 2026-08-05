@@ -20,6 +20,8 @@
 #define HD60PRO_MAILBOX_POLL_MAX_US		1500U
 #define HD60PRO_I2C_EXPERIMENT_REG_04             0x04U
 #define HD60PRO_I2C_EXPERIMENT_REG_11             0x11U
+#define HD60PRO_I2C_EXPERIMENT_REG_19             0x19U
+#define HD60PRO_I2C_EXPERIMENT_REG_3D             0x3dU
 #define HD60PRO_I2C_EXPERIMENT_REG_73             0x73U
 #define HD60PRO_I2C_EXPERIMENT_DEFAULT_REG        HD60PRO_I2C_EXPERIMENT_REG_11
 
@@ -463,6 +465,8 @@ static bool sc0710_hd60pro_i2c_reg_is_whitelisted(u32 reg)
         switch (reg) {
         case HD60PRO_I2C_EXPERIMENT_REG_04:
         case HD60PRO_I2C_EXPERIMENT_REG_11:
+        case HD60PRO_I2C_EXPERIMENT_REG_19:
+        case HD60PRO_I2C_EXPERIMENT_REG_3D:
         case HD60PRO_I2C_EXPERIMENT_REG_73:
                 return true;
         default:
@@ -1004,9 +1008,11 @@ sc0710_hd60pro_experimental_i2c_read_show(struct seq_file *s, void *unused)
 	seq_printf(s, "address_8bit=0x%02x\n", state->i2c.address_8bit);
 	seq_printf(s, "address_7bit=0x%02x\n", state->i2c.address_8bit >> 1);
 	seq_printf(s, "register=0x%02x\n", state->i2c.reg);
-	seq_printf(s, "register_whitelist=0x%02x,0x%02x,0x%02x\n",
+	seq_printf(s, "register_whitelist=0x%02x,0x%02x,0x%02x,0x%02x,0x%02x\n",
 		   HD60PRO_I2C_EXPERIMENT_REG_04,
 		   HD60PRO_I2C_EXPERIMENT_REG_11,
+		   HD60PRO_I2C_EXPERIMENT_REG_19,
+		   HD60PRO_I2C_EXPERIMENT_REG_3D,
 		   HD60PRO_I2C_EXPERIMENT_REG_73);
 	seq_printf(s, "value_valid=%u\n", state->i2c.value_valid);
 	seq_printf(s, "value=0x%02x\n", state->i2c.value);
