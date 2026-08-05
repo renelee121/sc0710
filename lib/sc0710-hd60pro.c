@@ -31,6 +31,16 @@ struct sc0710_hd60pro_reg {
 	const char *name;
 };
 
+struct sc0710_hd60pro_signal_poll_result {
+	bool completed;
+	bool late_completion;
+	u8 polls;
+	u32 last_poll_status;
+	u32 response;
+	u64 elapsed_ns;
+	struct sc0710_hd60pro_mailbox_snapshot after;
+};
+
 static const struct sc0710_hd60pro_reg hd60pro_readable_regs[] = {
 	{
 		.bar = 0,
@@ -398,15 +408,135 @@ sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
 }
 
 static int
-sc0710_hd60pro_run_signal_read_experiment(struct sc0710_dev *dev)
+sc0710_hd60pro_signal_read_poll_locked(
+	struct sc0710_dev *dev,
+	u8 signal_index,
+	const struct sc0710_hd60pro_mailbox_snapshot *before,
+	struct sc0710_hd60pro_signal_poll_result *result)
 {
-	struct sc0710_hd60pro_state *state;
-	u64 started_ns = 0;
+	u64 started_ns;
 	u32 status = 0;
 	u32 response = 0;
 	unsigned int i;
 	int ret;
 	int snapshot_ret;
+
+	if (!result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+
+	if (!dev || !before)
+		return -EINVAL;
+
+	result->after = *before;
+	result->last_poll_status = before->mailbox_status;
+
+	/* Keep the transport restricted to the single signal proven in G1-A. */
+	if (signal_index != HD60PRO_SIGNAL_HDMI_HPD)
+		return -EPERM;
+
+	started_ns = ktime_get_ns();
+
+	ret = sc0710_hd60pro_write_bar0(dev,
+					HD60PRO_BAR0_MAILBOX_STATUS, 0);
+	if (ret)
+		goto out;
+
+	ret = sc0710_hd60pro_write_bar0(dev,
+					HD60PRO_BAR0_MAILBOX_OPCODE,
+					HD60PRO_CMD_SIGNAL_READ);
+	if (ret)
+		goto out;
+
+	ret = sc0710_hd60pro_write_bar0(dev,
+					HD60PRO_BAR0_MAILBOX_WORD2,
+					BIT(signal_index));
+	if (ret)
+		goto out;
+
+	/* request[3] is explicitly zero before it becomes response word 0. */
+	ret = sc0710_hd60pro_write_bar0(dev,
+					HD60PRO_BAR0_MAILBOX_RESPONSE0, 0);
+	if (ret)
+		goto out;
+
+	ret = sc0710_hd60pro_write_bar0(dev,
+					HD60PRO_BAR0_MAILBOX_TRIGGER,
+					HD60PRO_MAILBOX_TRIGGER_VALUE);
+	if (ret)
+		goto out;
+
+	/*
+	 * writel() preserves MMIO write ordering. The first readl() also flushes
+	 * posted writes before completion is evaluated.
+	 */
+	for (i = 0; i < HD60PRO_MAILBOX_POLL_COUNT; i++) {
+		ret = sc0710_hd60pro_read_bar0(
+			dev, HD60PRO_BAR0_MAILBOX_STATUS, &status);
+		if (ret)
+			goto out;
+
+		result->polls = i + 1;
+		result->last_poll_status = status;
+
+		if (status & HD60PRO_MAILBOX_STATUS_COMPLETE) {
+			ret = sc0710_hd60pro_read_bar0(
+				dev, HD60PRO_BAR0_MAILBOX_RESPONSE0, &response);
+			if (ret)
+				goto out;
+
+			result->completed = true;
+			result->response = response;
+			ret = 0;
+			goto out;
+		}
+
+		usleep_range(HD60PRO_MAILBOX_POLL_MIN_US,
+			     HD60PRO_MAILBOX_POLL_MAX_US);
+	}
+
+	ret = -ETIMEDOUT;
+
+out:
+	result->elapsed_ns = ktime_get_ns() - started_ns;
+
+	/* Read-only after-snapshot; no clear, ACK, retry or reset is attempted. */
+	snapshot_ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &result->after);
+	if (snapshot_ret) {
+		if (!ret)
+			ret = snapshot_ret;
+	} else {
+		result->late_completion =
+			!result->completed &&
+			!!(result->after.mailbox_status &
+			   HD60PRO_MAILBOX_STATUS_COMPLETE);
+
+		if (!result->completed) {
+			if (!sc0710_hd60pro_read_bar0(
+				    dev, HD60PRO_BAR0_MAILBOX_RESPONSE0,
+				    &response))
+				result->response = response;
+		}
+
+		if (result->after.pci_command & PCI_COMMAND_MASTER) {
+			pci_clear_master(dev->pci);
+			ret = -EIO;
+		}
+
+		if (!ret && result->after.irq_status != 0)
+			ret = -EIO;
+	}
+
+	return ret;
+}
+
+static int
+sc0710_hd60pro_run_signal_read_experiment(struct sc0710_dev *dev)
+{
+	struct sc0710_hd60pro_signal_poll_result result;
+	struct sc0710_hd60pro_state *state;
+	int ret;
 
 	if (!dev)
 		return -ENODEV;
@@ -431,100 +561,23 @@ sc0710_hd60pro_run_signal_read_experiment(struct sc0710_dev *dev)
 	 */
 	state->attempt_consumed = true;
 	state->in_progress = true;
-	started_ns = ktime_get_ns();
 
-	ret = sc0710_hd60pro_write_bar0(dev,
-					HD60PRO_BAR0_MAILBOX_STATUS, 0);
-	if (ret)
-		goto out_after_attempt;
+	ret = sc0710_hd60pro_signal_read_poll_locked(
+		dev,
+		HD60PRO_SIGNAL_HDMI_HPD,
+		&state->before,
+		&result);
 
-	ret = sc0710_hd60pro_write_bar0(dev,
-					HD60PRO_BAR0_MAILBOX_OPCODE,
-					HD60PRO_CMD_SIGNAL_READ);
-	if (ret)
-		goto out_after_attempt;
-
-	ret = sc0710_hd60pro_write_bar0(dev,
-					HD60PRO_BAR0_MAILBOX_WORD2,
-					BIT(HD60PRO_SIGNAL_HDMI_HPD));
-	if (ret)
-		goto out_after_attempt;
-
-	/* request[3] is explicitly zero before it becomes response word 0. */
-	ret = sc0710_hd60pro_write_bar0(dev,
-					HD60PRO_BAR0_MAILBOX_RESPONSE0, 0);
-	if (ret)
-		goto out_after_attempt;
-
-	ret = sc0710_hd60pro_write_bar0(dev,
-					HD60PRO_BAR0_MAILBOX_TRIGGER,
-					HD60PRO_MAILBOX_TRIGGER_VALUE);
-	if (ret)
-		goto out_after_attempt;
-
-	/*
-	 * writel() preserves MMIO write ordering. The first readl() also flushes
-	 * posted writes before completion is evaluated.
-	 */
-	for (i = 0; i < HD60PRO_MAILBOX_POLL_COUNT; i++) {
-		ret = sc0710_hd60pro_read_bar0(
-			dev, HD60PRO_BAR0_MAILBOX_STATUS, &status);
-		if (ret)
-			goto out_after_attempt;
-
-		state->polls = i + 1;
-		state->last_poll_status = status;
-
-		if (status & HD60PRO_MAILBOX_STATUS_COMPLETE) {
-			ret = sc0710_hd60pro_read_bar0(
-				dev, HD60PRO_BAR0_MAILBOX_RESPONSE0, &response);
-			if (ret)
-				goto out_after_attempt;
-
-			state->completed = true;
-			state->signal_value_valid = true;
-			state->response = response;
-			state->signal_value =
-				!!(response & BIT(HD60PRO_SIGNAL_HDMI_HPD));
-			ret = 0;
-			goto out_after_attempt;
-		}
-
-		usleep_range(HD60PRO_MAILBOX_POLL_MIN_US,
-			     HD60PRO_MAILBOX_POLL_MAX_US);
-	}
-
-	ret = -ETIMEDOUT;
-
-out_after_attempt:
-	state->elapsed_ns = ktime_get_ns() - started_ns;
-
-	/* Read-only after-snapshot; no clear, ACK, retry or reset is attempted. */
-	snapshot_ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &state->after);
-	if (snapshot_ret) {
-		if (!ret)
-			ret = snapshot_ret;
-	} else {
-		state->late_completion =
-			!state->completed &&
-			!!(state->after.mailbox_status &
-			   HD60PRO_MAILBOX_STATUS_COMPLETE);
-
-		if (!state->completed) {
-			if (!sc0710_hd60pro_read_bar0(
-				    dev, HD60PRO_BAR0_MAILBOX_RESPONSE0,
-				    &response))
-				state->response = response;
-		}
-
-		if (state->after.pci_command & PCI_COMMAND_MASTER) {
-			pci_clear_master(dev->pci);
-			ret = -EIO;
-		}
-
-		if (!ret && state->after.irq_status != 0)
-			ret = -EIO;
-	}
+	state->completed = result.completed;
+	state->signal_value_valid = result.completed;
+	state->late_completion = result.late_completion;
+	state->signal_value = result.completed &&
+		!!(result.response & BIT(HD60PRO_SIGNAL_HDMI_HPD));
+	state->polls = result.polls;
+	state->last_poll_status = result.last_poll_status;
+	state->response = result.response;
+	state->elapsed_ns = result.elapsed_ns;
+	state->after = result.after;
 
 out:
 	state->last_error = ret;
