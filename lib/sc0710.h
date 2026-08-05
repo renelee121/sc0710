@@ -546,6 +546,8 @@ struct sc0710_dev {
 
 	/* pci stuff */
 	struct pci_dev             *pci;
+	u16                        pci_command_before_enable;
+	bool                       pci_command_before_enable_valid;
 	unsigned char              pci_rev, pci_lat;
 	u32                        __iomem *lmmio[2];
 	u8                         __iomem *bmmio[2];

@@ -880,6 +880,50 @@ static void sc0710_dev_release(struct v4l2_device *v4l2_dev)
 	kfree(dev);
 }
 
+/*
+ * pci_disable_device() balances the PCI enable count and clears bus
+ * mastering, but it does not necessarily restore the I/O and memory decode
+ * bits that were present before probe. The observational backend must leave
+ * those decode bits exactly as it found them while never restoring bus
+ * mastering.
+ */
+static void sc0710_restore_pci_decode_state(struct sc0710_dev *dev)
+{
+        u16 command;
+        u16 restored;
+        int ret;
+
+        if (!dev || !dev->pci ||
+            !dev->pci_command_before_enable_valid)
+                return;
+
+        ret = pci_read_config_word(dev->pci, PCI_COMMAND, &command);
+        if (ret) {
+                pr_warn("sc0710: failed to read PCI command for %s during decode restore (%d)\n",
+                        pci_name(dev->pci), ret);
+                return;
+        }
+
+        restored = command &
+                   ~(PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
+                     PCI_COMMAND_MASTER);
+        restored |= dev->pci_command_before_enable &
+                    (PCI_COMMAND_IO | PCI_COMMAND_MEMORY);
+
+        if (restored == command)
+                return;
+
+        ret = pci_write_config_word(dev->pci, PCI_COMMAND, restored);
+        if (ret) {
+                pr_warn("sc0710: failed to restore PCI decode state for %s (%d)\n",
+                        pci_name(dev->pci), ret);
+                return;
+        }
+
+        pr_info("sc0710: restored PCI decode state for %s: 0x%04x -> 0x%04x\n",
+                pci_name(dev->pci), command, restored);
+}
+
 static int sc0710_initdev(struct pci_dev *pci_dev,
 	const struct pci_device_id *pci_id)
 {
@@ -906,9 +950,22 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 	 * querycap bus_info source) valid for file handles that outlive a
 	 * remove; dropped in sc0710_dev_release. */
 	dev->pci = pci_dev_get(pci_dev);
+
+	if (pci_read_config_word(
+	            pci_dev, PCI_COMMAND,
+	            &dev->pci_command_before_enable)) {
+	        printk(KERN_ERR
+	               "sc0710: failed to capture pre-enable PCI command for %s\n",
+	               pci_name(pci_dev));
+	        err = -EIO;
+	        goto fail_v4l2;
+	}
+	dev->pci_command_before_enable_valid = true;
+
 	if (pci_enable_device(pci_dev)) {
-		err = -EIO;
-		goto fail_v4l2;
+	        err = -EIO;
+	        sc0710_restore_pci_decode_state(dev);
+	        goto fail_v4l2;
 	}
 
 	/* print pci info */
@@ -1098,7 +1155,8 @@ fail_backend:
 fail_dev:
 	sc0710_dev_unregister(dev);
 fail_disable:
-	pci_disable_device(pci_dev);
+        pci_disable_device(pci_dev);
+        sc0710_restore_pci_decode_state(dev);
 fail_v4l2:
 	v4l2_device_unregister(&dev->v4l2_dev);
 	v4l2_device_put(&dev->v4l2_dev);
@@ -1125,6 +1183,7 @@ static void sc0710_finidev(struct pci_dev *pci_dev)
 		dev->hw_ops->fini(dev);
 		sc0710_dev_unregister(dev);
 		pci_disable_device(pci_dev);
+		sc0710_restore_pci_decode_state(dev);
 
 		v4l2_device_unregister(&dev->v4l2_dev);
 		v4l2_device_put(&dev->v4l2_dev);
