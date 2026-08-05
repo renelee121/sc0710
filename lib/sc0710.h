@@ -471,10 +471,7 @@ struct sc0710_hd60pro_mailbox_snapshot {
 	u32 irq_tag;
 };
 
-struct sc0710_hd60pro_state {
-	struct mutex mailbox_lock;
-	bool attempt_consumed;
-	bool in_progress;
+struct sc0710_hd60pro_signal_result {
 	bool completed;
 	bool signal_value_valid;
 	bool late_completion;
@@ -487,14 +484,25 @@ struct sc0710_hd60pro_state {
 	u64 elapsed_ns;
 	struct sc0710_hd60pro_mailbox_snapshot before;
 	struct sc0710_hd60pro_mailbox_snapshot after;
+};
+
+struct sc0710_hd60pro_clear_result {
+	bool completed;
+	int last_error;
+	u64 elapsed_ns;
+	struct sc0710_hd60pro_mailbox_snapshot before;
+	struct sc0710_hd60pro_mailbox_snapshot after;
+};
+
+struct sc0710_hd60pro_state {
+	struct mutex mailbox_lock;
+	bool attempt_consumed;
+	bool in_progress;
+	struct sc0710_hd60pro_signal_result signal;
 
 	bool clear_attempt_consumed;
 	bool clear_in_progress;
-	bool clear_completed;
-	int clear_last_error;
-	u64 clear_elapsed_ns;
-	struct sc0710_hd60pro_mailbox_snapshot clear_before;
-	struct sc0710_hd60pro_mailbox_snapshot clear_after;
+	struct sc0710_hd60pro_clear_result clear;
 };
 
 struct sc0710_dev {

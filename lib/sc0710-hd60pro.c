@@ -332,29 +332,29 @@ static void
 sc0710_hd60pro_reset_experiment_result(struct sc0710_hd60pro_state *state)
 {
 	state->in_progress = false;
-	state->completed = false;
-	state->signal_value_valid = false;
-	state->late_completion = false;
-	state->last_error = 0;
-	state->signal_index = HD60PRO_SIGNAL_HDMI_HPD;
-	state->signal_value = 0;
-	state->polls = 0;
-	state->last_poll_status = 0;
-	state->response = 0;
-	state->elapsed_ns = 0;
-	memset(&state->before, 0, sizeof(state->before));
-	memset(&state->after, 0, sizeof(state->after));
+	state->signal.completed = false;
+	state->signal.signal_value_valid = false;
+	state->signal.late_completion = false;
+	state->signal.last_error = 0;
+	state->signal.signal_index = HD60PRO_SIGNAL_HDMI_HPD;
+	state->signal.signal_value = 0;
+	state->signal.polls = 0;
+	state->signal.last_poll_status = 0;
+	state->signal.response = 0;
+	state->signal.elapsed_ns = 0;
+	memset(&state->signal.before, 0, sizeof(state->signal.before));
+	memset(&state->signal.after, 0, sizeof(state->signal.after));
 }
 
 static void
 sc0710_hd60pro_reset_clear_result(struct sc0710_hd60pro_state *state)
 {
 	state->clear_in_progress = false;
-	state->clear_completed = false;
-	state->clear_last_error = 0;
-	state->clear_elapsed_ns = 0;
-	memset(&state->clear_before, 0, sizeof(state->clear_before));
-	memset(&state->clear_after, 0, sizeof(state->clear_after));
+	state->clear.completed = false;
+	state->clear.last_error = 0;
+	state->clear.elapsed_ns = 0;
+	memset(&state->clear.before, 0, sizeof(state->clear.before));
+	memset(&state->clear.after, 0, sizeof(state->clear.after));
 }
 
 static int
@@ -421,15 +421,15 @@ sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
 	if (state->clear_attempt_consumed)
 		return -EBUSY;
 
-	ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &state->before);
+	ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &state->signal.before);
 	if (ret)
 		return ret;
 
-	state->after = state->before;
-	state->last_poll_status = state->before.mailbox_status;
+	state->signal.after = state->signal.before;
+	state->signal.last_poll_status = state->signal.before.mailbox_status;
 
 	return sc0710_hd60pro_validate_mailbox_snapshot_locked(
-		dev, &state->before, 0);
+		dev, &state->signal.before, 0);
 }
 
 static int
@@ -590,22 +590,22 @@ sc0710_hd60pro_run_signal_read_experiment(struct sc0710_dev *dev)
 	ret = sc0710_hd60pro_signal_read_poll_locked(
 		dev,
 		HD60PRO_SIGNAL_HDMI_HPD,
-		&state->before,
+		&state->signal.before,
 		&result);
 
-	state->completed = result.completed;
-	state->signal_value_valid = result.completed;
-	state->late_completion = result.late_completion;
-	state->signal_value = result.completed &&
+	state->signal.completed = result.completed;
+	state->signal.signal_value_valid = result.completed;
+	state->signal.late_completion = result.late_completion;
+	state->signal.signal_value = result.completed &&
 		!!(result.response & BIT(HD60PRO_SIGNAL_HDMI_HPD));
-	state->polls = result.polls;
-	state->last_poll_status = result.last_poll_status;
-	state->response = result.response;
-	state->elapsed_ns = result.elapsed_ns;
-	state->after = result.after;
+	state->signal.polls = result.polls;
+	state->signal.last_poll_status = result.last_poll_status;
+	state->signal.response = result.response;
+	state->signal.elapsed_ns = result.elapsed_ns;
+	state->signal.after = result.after;
 
 out:
-	state->last_error = ret;
+	state->signal.last_error = ret;
 	state->in_progress = false;
 out_preserve_result:
 	mutex_unlock(&state->mailbox_lock);
@@ -630,16 +630,16 @@ sc0710_hd60pro_validate_clear_experiment(
 		return -EBUSY;
 
 	ret = sc0710_hd60pro_take_mailbox_snapshot(
-		dev, &state->clear_before);
+		dev, &state->clear.before);
 	if (ret)
 		return ret;
 
-	state->clear_after = state->clear_before;
+	state->clear.after = state->clear.before;
 
 	/* Clear only the exact stale completion state observed in G1-A. */
 	return sc0710_hd60pro_validate_mailbox_snapshot_locked(
 		dev,
-		&state->clear_before,
+		&state->clear.before,
 		HD60PRO_MAILBOX_STATUS_COMPLETE);
 }
 
@@ -696,29 +696,29 @@ sc0710_hd60pro_run_clear_experiment(struct sc0710_dev *dev)
 	ret = 0;
 
 out_after_attempt:
-	state->clear_elapsed_ns = ktime_get_ns() - started_ns;
+	state->clear.elapsed_ns = ktime_get_ns() - started_ns;
 
 	snapshot_ret = sc0710_hd60pro_take_mailbox_snapshot(
-		dev, &state->clear_after);
+		dev, &state->clear.after);
 	if (snapshot_ret) {
 		if (!ret)
 			ret = snapshot_ret;
 	} else {
-		if (state->clear_after.pci_command & PCI_COMMAND_MASTER) {
+		if (state->clear.after.pci_command & PCI_COMMAND_MASTER) {
 			pci_clear_master(dev->pci);
 			ret = -EIO;
 		}
 
-		if (!ret && (state->clear_after.mailbox_status != 0 ||
-		             state->clear_after.irq_status != 0))
+		if (!ret && (state->clear.after.mailbox_status != 0 ||
+		             state->clear.after.irq_status != 0))
 			ret = -EIO;
 	}
 
 	if (!ret)
-		state->clear_completed = true;
+		state->clear.completed = true;
 
 out:
-	state->clear_last_error = ret;
+	state->clear.last_error = ret;
 	state->clear_in_progress = false;
 out_preserve_result:
 	mutex_unlock(&state->mailbox_lock);
@@ -741,27 +741,27 @@ sc0710_hd60pro_experimental_mailbox_clear_show(
 	seq_printf(s, "clear_in_progress=%u\n",
 		   state->clear_in_progress);
 	seq_printf(s, "clear_completed=%u\n",
-		   state->clear_completed);
+		   state->clear.completed);
 	seq_printf(s, "clear_last_error=%d\n",
-		   state->clear_last_error);
+		   state->clear.last_error);
 	seq_printf(s, "clear_elapsed_us=%llu\n",
-		   (unsigned long long)(state->clear_elapsed_ns / 1000));
+		   (unsigned long long)(state->clear.elapsed_ns / 1000));
 	seq_printf(s, "pci_command_before=0x%04x\n",
-		   state->clear_before.pci_command);
+		   state->clear.before.pci_command);
 	seq_printf(s, "mailbox_status_before=0x%08x\n",
-		   state->clear_before.mailbox_status);
+		   state->clear.before.mailbox_status);
 	seq_printf(s, "irq_status_before=0x%08x\n",
-		   state->clear_before.irq_status);
+		   state->clear.before.irq_status);
 	seq_printf(s, "irq_tag_before=0x%08x\n",
-		   state->clear_before.irq_tag);
+		   state->clear.before.irq_tag);
 	seq_printf(s, "pci_command_after=0x%04x\n",
-		   state->clear_after.pci_command);
+		   state->clear.after.pci_command);
 	seq_printf(s, "mailbox_status_after=0x%08x\n",
-		   state->clear_after.mailbox_status);
+		   state->clear.after.mailbox_status);
 	seq_printf(s, "irq_status_after=0x%08x\n",
-		   state->clear_after.irq_status);
+		   state->clear.after.irq_status);
 	seq_printf(s, "irq_tag_after=0x%08x\n",
-		   state->clear_after.irq_tag);
+		   state->clear.after.irq_tag);
 
 	mutex_unlock(&state->mailbox_lock);
 	return 0;
@@ -827,35 +827,35 @@ sc0710_hd60pro_experimental_signal_read_show(struct seq_file *s, void *unused)
 		   READ_ONCE(hd60pro_experimental_mailbox));
 	seq_printf(s, "attempt_consumed=%u\n", state->attempt_consumed);
 	seq_printf(s, "in_progress=%u\n", state->in_progress);
-	seq_printf(s, "completed=%u\n", state->completed);
-	seq_printf(s, "late_completion=%u\n", state->late_completion);
-	seq_printf(s, "last_error=%d\n", state->last_error);
-	seq_printf(s, "signal_index=%u\n", state->signal_index);
+	seq_printf(s, "completed=%u\n", state->signal.completed);
+	seq_printf(s, "late_completion=%u\n", state->signal.late_completion);
+	seq_printf(s, "last_error=%d\n", state->signal.last_error);
+	seq_printf(s, "signal_index=%u\n", state->signal.signal_index);
 	seq_puts(s, "signal_name=HDMI_HPD\n");
-	seq_printf(s, "signal_value_valid=%u\n", state->signal_value_valid);
-	seq_printf(s, "signal_value=%u\n", state->signal_value);
-	seq_printf(s, "polls=%u\n", state->polls);
+	seq_printf(s, "signal_value_valid=%u\n", state->signal.signal_value_valid);
+	seq_printf(s, "signal_value=%u\n", state->signal.signal_value);
+	seq_printf(s, "polls=%u\n", state->signal.polls);
 	seq_printf(s, "elapsed_us=%llu\n",
-		   (unsigned long long)(state->elapsed_ns / 1000));
+		   (unsigned long long)(state->signal.elapsed_ns / 1000));
 	seq_printf(s, "last_poll_status=0x%08x\n",
-		   state->last_poll_status);
-	seq_printf(s, "response=0x%08x\n", state->response);
+		   state->signal.last_poll_status);
+	seq_printf(s, "response=0x%08x\n", state->signal.response);
 	seq_printf(s, "pci_command_before=0x%04x\n",
-		   state->before.pci_command);
+		   state->signal.before.pci_command);
 	seq_printf(s, "mailbox_status_before=0x%08x\n",
-		   state->before.mailbox_status);
+		   state->signal.before.mailbox_status);
 	seq_printf(s, "irq_status_before=0x%08x\n",
-		   state->before.irq_status);
+		   state->signal.before.irq_status);
 	seq_printf(s, "irq_tag_before=0x%08x\n",
-		   state->before.irq_tag);
+		   state->signal.before.irq_tag);
 	seq_printf(s, "pci_command_after=0x%04x\n",
-		   state->after.pci_command);
+		   state->signal.after.pci_command);
 	seq_printf(s, "mailbox_status_after=0x%08x\n",
-		   state->after.mailbox_status);
+		   state->signal.after.mailbox_status);
 	seq_printf(s, "irq_status_after=0x%08x\n",
-		   state->after.irq_status);
+		   state->signal.after.irq_status);
 	seq_printf(s, "irq_tag_after=0x%08x\n",
-		   state->after.irq_tag);
+		   state->signal.after.irq_tag);
 
 	mutex_unlock(&state->mailbox_lock);
 	return 0;
