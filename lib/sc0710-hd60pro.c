@@ -453,6 +453,18 @@ sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
 		dev, &state->signal.before, 0);
 }
 
+static bool sc0710_hd60pro_i2c_reg_is_whitelisted(u8 reg)
+{
+	switch (reg) {
+	case 0x04:
+	case 0x11:
+	case 0x73:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static int
 sc0710_hd60pro_mailbox_transaction_locked(
 	struct sc0710_dev *dev,
@@ -491,7 +503,7 @@ sc0710_hd60pro_mailbox_transaction_locked(
 		break;
 	case HD60PRO_CMD_I2C_READ_REG8:
 		if (request->word2 != HD60PRO_I2C_VIDEO_FRONTEND_ADDR_8BIT ||
-		    request->word3 != 0x11 ||
+		    !sc0710_hd60pro_i2c_reg_is_whitelisted(request->word3) ||
 		    request->response_offset != HD60PRO_BAR0_MAILBOX_RESPONSE1)
 			return -EPERM;
 		break;
@@ -633,6 +645,7 @@ sc0710_hd60pro_run_signal_read_experiment(struct sc0710_dev *dev)
 	if (!dev)
 		return -ENODEV;
 
+
 	state = &dev->hd60pro_state;
 
 	mutex_lock(&state->mailbox_lock);
@@ -708,12 +721,12 @@ sc0710_hd60pro_validate_i2c_experiment(
 }
 
 static int
-sc0710_hd60pro_run_i2c_read_experiment(struct sc0710_dev *dev)
+sc0710_hd60pro_run_i2c_read_experiment(struct sc0710_dev *dev, u8 reg)
 {
 	const struct sc0710_hd60pro_mailbox_request request = {
 		.command = HD60PRO_CMD_I2C_READ_REG8,
 		.word2 = HD60PRO_I2C_VIDEO_FRONTEND_ADDR_8BIT,
-		.word3 = 0x11,
+		.word3 = reg,
 		.response_offset = HD60PRO_BAR0_MAILBOX_RESPONSE1,
 	};
 	struct sc0710_hd60pro_mailbox_result result;
@@ -732,6 +745,7 @@ sc0710_hd60pro_run_i2c_read_experiment(struct sc0710_dev *dev)
 	}
 
 	sc0710_hd60pro_reset_i2c_result(state);
+	state->i2c.reg = reg;
 
 	ret = sc0710_hd60pro_validate_i2c_experiment(dev, state);
 	if (ret)
@@ -982,6 +996,7 @@ sc0710_hd60pro_experimental_i2c_read_show(struct seq_file *s, void *unused)
 	seq_printf(s, "address_8bit=0x%02x\n", state->i2c.address_8bit);
 	seq_printf(s, "address_7bit=0x%02x\n", state->i2c.address_8bit >> 1);
 	seq_printf(s, "register=0x%02x\n", state->i2c.reg);
+	seq_puts(s, "register_whitelist=0x04,0x11,0x73\n");
 	seq_printf(s, "value_valid=%u\n", state->i2c.value_valid);
 	seq_printf(s, "value=0x%02x\n", state->i2c.value);
 	seq_printf(s, "polls=%u\n", state->i2c.polls);
@@ -1027,8 +1042,9 @@ sc0710_hd60pro_experimental_i2c_read_write(struct file *file,
 {
 	struct seq_file *seq = file->private_data;
 	struct sc0710_dev *dev = seq->private;
-	char buf[8];
+	char buf[16];
 	char *command;
+	u8 reg;
 	int ret;
 
 	if (count == 0 || count >= sizeof(buf))
@@ -1039,10 +1055,15 @@ sc0710_hd60pro_experimental_i2c_read_write(struct file *file,
 
 	buf[count] = '\0';
 	command = strim(buf);
-	if (strcmp(command, "1") != 0)
-		return -EINVAL;
 
-	ret = sc0710_hd60pro_run_i2c_read_experiment(dev);
+	ret = kstrtou8(command, 0, &reg);
+	if (ret)
+		return ret;
+
+	if (!sc0710_hd60pro_i2c_reg_is_whitelisted(reg))
+		return -EPERM;
+
+	ret = sc0710_hd60pro_run_i2c_read_experiment(dev, reg);
 	if (ret)
 		return ret;
 
