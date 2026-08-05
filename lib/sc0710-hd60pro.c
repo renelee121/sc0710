@@ -169,27 +169,60 @@ sc0710_hd60pro_take_mailbox_snapshot(
 		&snapshot->irq_tag);
 }
 
+/*
+ * Serialise every debugfs path that touches PCI configuration or MMIO with
+ * the experimental mailbox operations. The debugfs core protects the file
+ * operation's private data lifetime; this lock additionally guarantees that
+ * observational reads cannot sample a partially-written mailbox command.
+ *
+ * Return with mailbox_lock held on success.
+ */
+static int sc0710_hd60pro_debugfs_hw_lock(struct sc0710_dev *dev)
+{
+	if (!dev)
+		return -ENODEV;
+
+	mutex_lock(&dev->hd60pro_state.mailbox_lock);
+
+	if (READ_ONCE(dev->disconnected) || !dev->pci) {
+		mutex_unlock(&dev->hd60pro_state.mailbox_lock);
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
+static void sc0710_hd60pro_debugfs_hw_unlock(struct sc0710_dev *dev)
+{
+	mutex_unlock(&dev->hd60pro_state.mailbox_lock);
+}
+
 static int
 sc0710_hd60pro_registers_show(struct seq_file *s, void *unused)
 {
 	struct sc0710_dev *dev = s->private;
 	unsigned int i;
+	int ret;
+
+	ret = sc0710_hd60pro_debugfs_hw_lock(dev);
+	if (ret)
+		return ret;
 
 	for (i = 0; i < ARRAY_SIZE(hd60pro_readable_regs); i++) {
 		const struct sc0710_hd60pro_reg *reg;
 		u32 value;
-		int ret;
+		int read_ret;
 
 		reg = &hd60pro_readable_regs[i];
 
-		ret = sc0710_hd60pro_read_reg(dev, reg, &value);
-		if (ret) {
+		read_ret = sc0710_hd60pro_read_reg(dev, reg, &value);
+		if (read_ret) {
 			seq_printf(s,
 				   "BAR%u[0x%08x] %-24s error=%d\n",
 				   reg->bar,
 				   reg->offset,
 				   reg->name,
-				   ret);
+				   read_ret);
 			continue;
 		}
 
@@ -201,6 +234,7 @@ sc0710_hd60pro_registers_show(struct seq_file *s, void *unused)
 			   value);
 	}
 
+	sc0710_hd60pro_debugfs_hw_unlock(dev);
 	return 0;
 }
 
@@ -227,9 +261,15 @@ sc0710_hd60pro_mailbox_snapshot_show(struct seq_file *s, void *unused)
 	struct sc0710_hd60pro_mailbox_snapshot snapshot;
 	int ret;
 
-	ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &snapshot);
+	ret = sc0710_hd60pro_debugfs_hw_lock(dev);
 	if (ret)
 		return ret;
+
+	ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &snapshot);
+	if (ret) {
+		sc0710_hd60pro_debugfs_hw_unlock(dev);
+		return ret;
+	}
 
 	seq_printf(s, "pci_command=0x%04x\n",
 		   snapshot.pci_command);
@@ -256,6 +296,7 @@ sc0710_hd60pro_mailbox_snapshot_show(struct seq_file *s, void *unused)
 		   snapshot.irq_tag &
 		   HD60PRO_IRQ_TAG_INDEX_MASK);
 
+	sc0710_hd60pro_debugfs_hw_unlock(dev);
 	return 0;
 }
 
@@ -818,13 +859,21 @@ sc0710_hd60pro_experimental_signal_read_fops = {
 static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 {
 	struct sc0710_dev *dev = s->private;
-	struct pci_dev *pci_dev = dev->pci;
+	struct pci_dev *pci_dev;
 	u16 command;
 	int ret;
 
-	ret = sc0710_hd60pro_read_pci_command(pci_dev, &command);
+	ret = sc0710_hd60pro_debugfs_hw_lock(dev);
 	if (ret)
 		return ret;
+
+	pci_dev = dev->pci;
+
+	ret = sc0710_hd60pro_read_pci_command(pci_dev, &command);
+	if (ret) {
+		sc0710_hd60pro_debugfs_hw_unlock(dev);
+		return ret;
+	}
 
 	seq_printf(s, "device=%s\n", dev->name);
 	seq_printf(s, "pci=%04x:%04x\n",
@@ -868,6 +917,7 @@ static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 	seq_puts(s, "irq=disabled\n");
 	seq_puts(s, "dma=disabled\n");
 
+	sc0710_hd60pro_debugfs_hw_unlock(dev);
 	return 0;
 }
 
