@@ -23,7 +23,7 @@ static bool hd60pro_experimental_mailbox;
 module_param_named(hd60pro_experimental_mailbox,
 		   hd60pro_experimental_mailbox, bool, 0400);
 MODULE_PARM_DESC(hd60pro_experimental_mailbox,
-		 "Allow one manual HD60 Pro SIGNAL_READ mailbox experiment per probe");
+		 "Allow one manual HD60 Pro mailbox experiment per probe");
 
 struct sc0710_hd60pro_reg {
 	u8 bar;
@@ -295,6 +295,17 @@ sc0710_hd60pro_reset_experiment_result(struct sc0710_hd60pro_state *state)
 	memset(&state->after, 0, sizeof(state->after));
 }
 
+static void
+sc0710_hd60pro_reset_clear_result(struct sc0710_hd60pro_state *state)
+{
+	state->clear_in_progress = false;
+	state->clear_completed = false;
+	state->clear_last_error = 0;
+	state->clear_elapsed_ns = 0;
+	memset(&state->clear_before, 0, sizeof(state->clear_before));
+	memset(&state->clear_after, 0, sizeof(state->clear_after));
+}
+
 static int
 sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
 				   struct sc0710_hd60pro_state *state)
@@ -320,6 +331,9 @@ sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
 
 	if (state->attempt_consumed)
 		return -EALREADY;
+
+	if (state->clear_attempt_consumed)
+		return -EBUSY;
 
 	ret = sc0710_hd60pro_take_mailbox_snapshot(dev, &state->before);
 	if (ret)
@@ -478,6 +492,234 @@ out_preserve_result:
 	mutex_unlock(&state->mailbox_lock);
 	return ret;
 }
+
+static int
+sc0710_hd60pro_validate_clear_experiment(
+	struct sc0710_dev *dev,
+	struct sc0710_hd60pro_state *state)
+{
+	int ret;
+
+	if (!READ_ONCE(hd60pro_experimental_mailbox))
+		return -EPERM;
+
+	if (!dev || !dev->pci || !state || READ_ONCE(dev->disconnected))
+		return -ENODEV;
+
+	if (dev->board != SC0710_BOARD_ELGATO_HD60_PRO ||
+	    dev->hw_ops != &sc0710_hd60pro_ops ||
+	    !dev->observational_only ||
+	    dev->pci->vendor != 0x12ab || dev->pci->device != 0x0380 ||
+	    dev->pci->subsystem_vendor != 0x1cfa ||
+	    dev->pci->subsystem_device != 0x0006)
+		return -EPERM;
+
+	if (dev->irq_requested || dev->kthread_dma || dev->kthread_hdmi)
+		return -EBUSY;
+
+	if (state->clear_attempt_consumed)
+		return -EALREADY;
+
+	if (state->attempt_consumed)
+		return -EBUSY;
+
+	ret = sc0710_hd60pro_take_mailbox_snapshot(
+		dev, &state->clear_before);
+	if (ret)
+		return ret;
+
+	state->clear_after = state->clear_before;
+
+	if (!(state->clear_before.pci_command & PCI_COMMAND_MEMORY))
+		return -EIO;
+
+	if (state->clear_before.pci_command & PCI_COMMAND_MASTER) {
+		pci_clear_master(dev->pci);
+		return -EIO;
+	}
+
+	if (state->clear_before.irq_status != 0)
+		return -EBUSY;
+
+	/* Clear only the exact stale completion state observed in G1-A. */
+	if (state->clear_before.mailbox_status !=
+	    HD60PRO_MAILBOX_STATUS_COMPLETE)
+		return -EBUSY;
+
+	return 0;
+}
+
+static int
+sc0710_hd60pro_run_clear_experiment(struct sc0710_dev *dev)
+{
+	struct sc0710_hd60pro_state *state;
+	u64 started_ns = 0;
+	u32 status = 0;
+	int ret;
+	int snapshot_ret;
+
+	if (!dev)
+		return -ENODEV;
+
+	state = &dev->hd60pro_state;
+
+	mutex_lock(&state->mailbox_lock);
+	if (state->clear_attempt_consumed) {
+		ret = -EALREADY;
+		goto out_preserve_result;
+	}
+
+	sc0710_hd60pro_reset_clear_result(state);
+
+	ret = sc0710_hd60pro_validate_clear_experiment(dev, state);
+	if (ret)
+		goto out;
+
+	/*
+	 * Consume the sole active action for this probe before the write. The
+	 * Windows polling path performs the same write before every command.
+	 */
+	state->clear_attempt_consumed = true;
+	state->clear_in_progress = true;
+	started_ns = ktime_get_ns();
+
+	ret = sc0710_hd60pro_write_bar0(
+		dev, HD60PRO_BAR0_MAILBOX_STATUS, 0);
+	if (ret)
+		goto out_after_attempt;
+
+	/* readl() flushes the posted clear and verifies its visible result. */
+	ret = sc0710_hd60pro_read_bar0(
+		dev, HD60PRO_BAR0_MAILBOX_STATUS, &status);
+	if (ret)
+		goto out_after_attempt;
+
+	if (status != 0) {
+		ret = -EIO;
+		goto out_after_attempt;
+	}
+
+	ret = 0;
+
+out_after_attempt:
+	state->clear_elapsed_ns = ktime_get_ns() - started_ns;
+
+	snapshot_ret = sc0710_hd60pro_take_mailbox_snapshot(
+		dev, &state->clear_after);
+	if (snapshot_ret) {
+		if (!ret)
+			ret = snapshot_ret;
+	} else {
+		if (state->clear_after.pci_command & PCI_COMMAND_MASTER) {
+			pci_clear_master(dev->pci);
+			ret = -EIO;
+		}
+
+		if (!ret && (state->clear_after.mailbox_status != 0 ||
+		             state->clear_after.irq_status != 0))
+			ret = -EIO;
+	}
+
+	if (!ret)
+		state->clear_completed = true;
+
+out:
+	state->clear_last_error = ret;
+	state->clear_in_progress = false;
+out_preserve_result:
+	mutex_unlock(&state->mailbox_lock);
+	return ret;
+}
+
+static int
+sc0710_hd60pro_experimental_mailbox_clear_show(
+	struct seq_file *s, void *unused)
+{
+	struct sc0710_dev *dev = s->private;
+	struct sc0710_hd60pro_state *state = &dev->hd60pro_state;
+
+	mutex_lock(&state->mailbox_lock);
+
+	seq_printf(s, "enabled=%u\n",
+		   READ_ONCE(hd60pro_experimental_mailbox));
+	seq_printf(s, "clear_attempt_consumed=%u\n",
+		   state->clear_attempt_consumed);
+	seq_printf(s, "clear_in_progress=%u\n",
+		   state->clear_in_progress);
+	seq_printf(s, "clear_completed=%u\n",
+		   state->clear_completed);
+	seq_printf(s, "clear_last_error=%d\n",
+		   state->clear_last_error);
+	seq_printf(s, "clear_elapsed_us=%llu\n",
+		   (unsigned long long)(state->clear_elapsed_ns / 1000));
+	seq_printf(s, "pci_command_before=0x%04x\n",
+		   state->clear_before.pci_command);
+	seq_printf(s, "mailbox_status_before=0x%08x\n",
+		   state->clear_before.mailbox_status);
+	seq_printf(s, "irq_status_before=0x%08x\n",
+		   state->clear_before.irq_status);
+	seq_printf(s, "irq_tag_before=0x%08x\n",
+		   state->clear_before.irq_tag);
+	seq_printf(s, "pci_command_after=0x%04x\n",
+		   state->clear_after.pci_command);
+	seq_printf(s, "mailbox_status_after=0x%08x\n",
+		   state->clear_after.mailbox_status);
+	seq_printf(s, "irq_status_after=0x%08x\n",
+		   state->clear_after.irq_status);
+	seq_printf(s, "irq_tag_after=0x%08x\n",
+		   state->clear_after.irq_tag);
+
+	mutex_unlock(&state->mailbox_lock);
+	return 0;
+}
+
+static int
+sc0710_hd60pro_experimental_mailbox_clear_open(
+	struct inode *inode, struct file *file)
+{
+	return single_open(file,
+			   sc0710_hd60pro_experimental_mailbox_clear_show,
+			   inode->i_private);
+}
+
+static ssize_t
+sc0710_hd60pro_experimental_mailbox_clear_write(
+	struct file *file, const char __user *user_buf,
+	size_t count, loff_t *ppos)
+{
+	struct seq_file *seq = file->private_data;
+	struct sc0710_dev *dev = seq->private;
+	char buf[8];
+	char *command;
+	int ret;
+
+	if (count == 0 || count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	buf[count] = '\0';
+	command = strim(buf);
+	if (strcmp(command, "1") != 0)
+		return -EINVAL;
+
+	ret = sc0710_hd60pro_run_clear_experiment(dev);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+static const struct file_operations
+sc0710_hd60pro_experimental_mailbox_clear_fops = {
+	.owner		= THIS_MODULE,
+	.open		= sc0710_hd60pro_experimental_mailbox_clear_open,
+	.read		= seq_read,
+	.write		= sc0710_hd60pro_experimental_mailbox_clear_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 
 static int
 sc0710_hd60pro_experimental_signal_read_show(struct seq_file *s, void *unused)
@@ -661,6 +903,7 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 
 	mutex_init(&dev->hd60pro_state.mailbox_lock);
 	sc0710_hd60pro_reset_experiment_result(&dev->hd60pro_state);
+	sc0710_hd60pro_reset_clear_result(&dev->hd60pro_state);
 
 	dev->hd60pro_debugfs_dir =
 		debugfs_create_dir(dev->name, NULL);
@@ -700,6 +943,17 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 				dev->hd60pro_debugfs_dir,
 				dev,
 				&sc0710_hd60pro_mailbox_snapshot_fops);
+	if (IS_ERR_OR_NULL(entry)) {
+		ret = entry ? PTR_ERR(entry) : -ENOMEM;
+		goto err_debugfs;
+	}
+
+	entry = debugfs_create_file(
+				"experimental_mailbox_clear",
+				0600,
+				dev->hd60pro_debugfs_dir,
+				dev,
+				&sc0710_hd60pro_experimental_mailbox_clear_fops);
 	if (IS_ERR_OR_NULL(entry)) {
 		ret = entry ? PTR_ERR(entry) : -ENOMEM;
 		goto err_debugfs;

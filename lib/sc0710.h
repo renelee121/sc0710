@@ -487,6 +487,14 @@ struct sc0710_hd60pro_state {
 	u64 elapsed_ns;
 	struct sc0710_hd60pro_mailbox_snapshot before;
 	struct sc0710_hd60pro_mailbox_snapshot after;
+
+	bool clear_attempt_consumed;
+	bool clear_in_progress;
+	bool clear_completed;
+	int clear_last_error;
+	u64 clear_elapsed_ns;
+	struct sc0710_hd60pro_mailbox_snapshot clear_before;
+	struct sc0710_hd60pro_mailbox_snapshot clear_after;
 };
 
 struct sc0710_dev {
