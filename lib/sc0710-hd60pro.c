@@ -25,6 +25,12 @@ module_param_named(hd60pro_experimental_mailbox,
 MODULE_PARM_DESC(hd60pro_experimental_mailbox,
 		 "Allow one manual HD60 Pro mailbox experiment per probe");
 
+
+static uint hd60pro_experimental_i2c_register = 0x11;
+module_param_named(hd60pro_experimental_i2c_register,
+                   hd60pro_experimental_i2c_register, uint, 0400);
+MODULE_PARM_DESC(hd60pro_experimental_i2c_register,
+                 "HD60 Pro guarded I2C_READ register: 0x04, 0x11 or 0x73");
 struct sc0710_hd60pro_reg {
 	u8 bar;
 	u32 offset;
@@ -375,7 +381,7 @@ sc0710_hd60pro_reset_i2c_result(struct sc0710_hd60pro_state *state)
 	state->i2c_in_progress = false;
 	memset(&state->i2c, 0, sizeof(state->i2c));
 	state->i2c.address_8bit = HD60PRO_I2C_VIDEO_FRONTEND_ADDR_8BIT;
-	state->i2c.reg = 0x11;
+	state->i2c.reg = READ_ONCE(hd60pro_experimental_i2c_register);
 }
 
 static int
@@ -692,6 +698,19 @@ out_preserve_result:
 	return ret;
 }
 
+static bool
+sc0710_hd60pro_i2c_register_allowed(unsigned int reg)
+{
+    switch (reg) {
+    case 0x04:
+    case 0x11:
+    case 0x73:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static int
 sc0710_hd60pro_validate_i2c_experiment(
 	struct sc0710_dev *dev,
@@ -703,9 +722,12 @@ sc0710_hd60pro_validate_i2c_experiment(
 	if (ret)
 		return ret;
 
+
+	if (!sc0710_hd60pro_i2c_register_allowed(state->i2c.reg))
+		return -EPERM;
+
 	if (state->i2c_attempt_consumed)
 		return -EALREADY;
-
 	if (state->attempt_consumed || state->clear_attempt_consumed)
 		return -EBUSY;
 
