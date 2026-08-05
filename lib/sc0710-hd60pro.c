@@ -358,11 +358,10 @@ sc0710_hd60pro_reset_clear_result(struct sc0710_hd60pro_state *state)
 }
 
 static int
-sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
-				   struct sc0710_hd60pro_state *state)
+sc0710_hd60pro_validate_manual_context_locked(
+	struct sc0710_dev *dev,
+	struct sc0710_hd60pro_state *state)
 {
-	int ret;
-
 	if (!READ_ONCE(hd60pro_experimental_mailbox))
 		return -EPERM;
 
@@ -380,6 +379,42 @@ sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
 	if (dev->irq_requested || dev->kthread_dma || dev->kthread_hdmi)
 		return -EBUSY;
 
+	return 0;
+}
+
+static int
+sc0710_hd60pro_validate_mailbox_snapshot_locked(
+	struct sc0710_dev *dev,
+	const struct sc0710_hd60pro_mailbox_snapshot *snapshot,
+	u32 expected_mailbox_status)
+{
+	if (!(snapshot->pci_command & PCI_COMMAND_MEMORY))
+		return -EIO;
+
+	if (snapshot->pci_command & PCI_COMMAND_MASTER) {
+		pci_clear_master(dev->pci);
+		return -EIO;
+	}
+
+	if (snapshot->irq_status != 0)
+		return -EBUSY;
+
+	if (snapshot->mailbox_status != expected_mailbox_status)
+		return -EBUSY;
+
+	return 0;
+}
+
+static int
+sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
+				   struct sc0710_hd60pro_state *state)
+{
+	int ret;
+
+	ret = sc0710_hd60pro_validate_manual_context_locked(dev, state);
+	if (ret)
+		return ret;
+
 	if (state->attempt_consumed)
 		return -EALREADY;
 
@@ -393,18 +428,8 @@ sc0710_hd60pro_validate_experiment(struct sc0710_dev *dev,
 	state->after = state->before;
 	state->last_poll_status = state->before.mailbox_status;
 
-	if (!(state->before.pci_command & PCI_COMMAND_MEMORY))
-		return -EIO;
-
-	if (state->before.pci_command & PCI_COMMAND_MASTER) {
-		pci_clear_master(dev->pci);
-		return -EIO;
-	}
-
-	if (state->before.mailbox_status != 0 || state->before.irq_status != 0)
-		return -EBUSY;
-
-	return 0;
+	return sc0710_hd60pro_validate_mailbox_snapshot_locked(
+		dev, &state->before, 0);
 }
 
 static int
@@ -594,22 +619,9 @@ sc0710_hd60pro_validate_clear_experiment(
 {
 	int ret;
 
-	if (!READ_ONCE(hd60pro_experimental_mailbox))
-		return -EPERM;
-
-	if (!dev || !dev->pci || !state || READ_ONCE(dev->disconnected))
-		return -ENODEV;
-
-	if (dev->board != SC0710_BOARD_ELGATO_HD60_PRO ||
-	    dev->hw_ops != &sc0710_hd60pro_ops ||
-	    !dev->observational_only ||
-	    dev->pci->vendor != 0x12ab || dev->pci->device != 0x0380 ||
-	    dev->pci->subsystem_vendor != 0x1cfa ||
-	    dev->pci->subsystem_device != 0x0006)
-		return -EPERM;
-
-	if (dev->irq_requested || dev->kthread_dma || dev->kthread_hdmi)
-		return -EBUSY;
+	ret = sc0710_hd60pro_validate_manual_context_locked(dev, state);
+	if (ret)
+		return ret;
 
 	if (state->clear_attempt_consumed)
 		return -EALREADY;
@@ -624,23 +636,11 @@ sc0710_hd60pro_validate_clear_experiment(
 
 	state->clear_after = state->clear_before;
 
-	if (!(state->clear_before.pci_command & PCI_COMMAND_MEMORY))
-		return -EIO;
-
-	if (state->clear_before.pci_command & PCI_COMMAND_MASTER) {
-		pci_clear_master(dev->pci);
-		return -EIO;
-	}
-
-	if (state->clear_before.irq_status != 0)
-		return -EBUSY;
-
 	/* Clear only the exact stale completion state observed in G1-A. */
-	if (state->clear_before.mailbox_status !=
-	    HD60PRO_MAILBOX_STATUS_COMPLETE)
-		return -EBUSY;
-
-	return 0;
+	return sc0710_hd60pro_validate_mailbox_snapshot_locked(
+		dev,
+		&state->clear_before,
+		HD60PRO_MAILBOX_STATUS_COMPLETE);
 }
 
 static int
