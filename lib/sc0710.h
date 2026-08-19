@@ -764,6 +764,11 @@ const struct sc0710_format *sc0710_format_find_by_timing_and_rate(u32 timingH, u
 
 
 /* -dma-channel.c */
+void sc0710_channel_init_common(struct sc0710_dma_channel *ch,
+                                struct sc0710_dev *dev,
+                                u32 nr,
+                                enum sc0710_channel_dir_e direction,
+                                enum sc0710_channel_type_e mediatype);
 int  sc0710_dma_channel_alloc(struct sc0710_dev *dev, u32 nr, enum sc0710_channel_dir_e direction, u32 baseaddr,
 	enum sc0710_channel_type_e mediatype);
 

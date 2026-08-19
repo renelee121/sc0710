@@ -1180,19 +1180,23 @@ static int sc0710_dma_channel_chains_link(struct sc0710_dma_channel *ch)
 	return 0; /* Success */
 }
 
-int sc0710_dma_channel_alloc(struct sc0710_dev *dev, u32 nr, enum sc0710_channel_dir_e direction,
-	u32 baseaddr,
-	enum sc0710_channel_type_e mediatype)
+/*
+ * Initialize backend-independent channel state.
+ *
+ * This owns only logical/media bookkeeping shared by capture backends:
+ * identity, serialization, client lists, streaming state and statistics.
+ *
+ * It must not allocate DMA memory, construct descriptor rings or program
+ * hardware registers.
+ */
+void sc0710_channel_init_common(struct sc0710_dma_channel *ch,
+                                struct sc0710_dev *dev,
+                                u32 nr,
+                                enum sc0710_channel_dir_e direction,
+                                enum sc0710_channel_type_e mediatype)
 {
-	int ret;
-	struct sc0710_dma_channel *ch = &dev->channel[nr];
-	if (nr >= SC0710_MAX_CHANNELS)
-		return -EINVAL;
-
-	if (direction != CHDIR_INPUT)
-		return -EINVAL;
-
 	memset(ch, 0, sizeof(*ch));
+
 	mutex_init(&ch->lock);
 	mutex_init(&ch->v4l2_lock);
 
@@ -1210,10 +1214,24 @@ int sc0710_dma_channel_alloc(struct sc0710_dev *dev, u32 nr, enum sc0710_channel
 	ch->direction = direction;
 	ch->mediatype = mediatype;
 	ch->state = STATE_STOPPED;
-	ch->dma_last_completion_jiffies = 0;
 	sc0710_things_per_second_reset(&ch->bitsPerSecond);
 	sc0710_things_per_second_reset(&ch->descPerSecond);
 	sc0710_things_per_second_reset(&ch->audioSamplesPerSecond);
+}
+
+int sc0710_dma_channel_alloc(struct sc0710_dev *dev, u32 nr, enum sc0710_channel_dir_e direction,
+	u32 baseaddr,
+	enum sc0710_channel_type_e mediatype)
+{
+	int ret;
+	struct sc0710_dma_channel *ch = &dev->channel[nr];
+	if (nr >= SC0710_MAX_CHANNELS)
+		return -EINVAL;
+
+	if (direction != CHDIR_INPUT)
+		return -EINVAL;
+
+        sc0710_channel_init_common(ch, dev, nr, direction, mediatype);
 
 	if (ch->mediatype == CHTYPE_VIDEO) {
 		ch->numDescriptorChains = DMA_TRANSFER_CHAINS;
