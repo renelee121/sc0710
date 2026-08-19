@@ -1317,7 +1317,7 @@ static int sc0710_buf_prepare(struct vb2_buffer *vb)
 		return -EINVAL;
 	}
 
-	if (zero_copy) {
+	if (zero_copy && ch->dev->hw_ops->uses_legacy_xdma_pipeline) {
 		struct sg_table *sgt = vb2_dma_sg_plane_desc(vb, 0);
 		struct scatterlist *sg;
 		unsigned int i;
@@ -1434,7 +1434,7 @@ static int sc0710_start_streaming(struct vb2_queue *q, unsigned int count)
 	/* Zero-copy is strict single-client: frames DMA into one client's
 	 * buffers, and there is no copy pass to fan out to a second. The
 	 * refcount doubles as the race-free exclusivity check. */
-	if (zero_copy && refcount > 1) {
+	if (zero_copy && dev->hw_ops->uses_legacy_xdma_pipeline && refcount > 1) {
 		printk_ratelimited(KERN_WARNING
 			"%s: zero-copy: a client is already streaming, refusing a second\n",
 			dev->name);
@@ -1507,7 +1507,7 @@ static void sc0710_stop_streaming(struct vb2_queue *q)
 			 * about to unmap the client's buffers, and no
 			 * descriptor may retain their DMA addresses (the stop
 			 * above quiesced the engine). */
-			if (zero_copy)
+			if (zero_copy && dev->hw_ops->uses_legacy_xdma_pipeline)
 				sc0710_dma_channel_untarget_all(ch);
 		}
 		timer_delete_sync(&ch->timeout);
@@ -1582,7 +1582,7 @@ static int sc0710_video_open(struct file *file)
 	/* Zero-copy needs DMA-mappable buffers the descriptors can target;
 	 * GFP_DMA32 matches the device's 32-bit DMA mask so driver-allocated
 	 * pages map without bounce buffering. */
-	if (zero_copy) {
+	if (zero_copy && dev->hw_ops->uses_legacy_xdma_pipeline) {
 		q->mem_ops = &vb2_dma_sg_memops;
 		q->gfp_flags = GFP_DMA32;
 	} else {

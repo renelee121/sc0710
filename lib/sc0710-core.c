@@ -452,7 +452,8 @@ static void sc0710_dev_unregister(struct sc0710_dev *dev)
 		pci_free_irq_vectors(dev->pci);
 	}
 
-	sc0710_dma_channels_free(dev);
+	if (dev->hw_ops && dev->hw_ops->uses_legacy_xdma_pipeline)
+	        sc0710_dma_channels_free(dev);
 
 	iounmap(dev->lmmio[0]);
 	iounmap(dev->lmmio[1]);
@@ -758,8 +759,9 @@ static int sc0710_thread_dma_function(void *data)
 		mutex_lock(&dev->kthread_dma_lock);
 		if (!dev->reconfig_in_progress) {
 			consumed = dev->hw_ops->capture_service(dev);
-			need_dma_resync = sc0710_dma_watchdog_check_locked(dev);
-			if (!need_dma_resync && dev->tear_resync_pending) {
+			if (dev->hw_ops->uses_legacy_xdma_pipeline)
+			        need_dma_resync = sc0710_dma_watchdog_check_locked(dev);
+			if (dev->hw_ops->uses_legacy_xdma_pipeline && !need_dma_resync && dev->tear_resync_pending) {
 				dev->tear_resync_pending = 0;
 				need_dma_resync = 1;
 				tear_requested_resync = 1;
@@ -1244,7 +1246,7 @@ static void sc0710_finidev(struct pci_dev *pci_dev)
 	for (i = 0; i < SC0710_MAX_CHANNELS; i++) {
 		struct sc0710_dma_channel *ch = &dev->channel[i];
 
-		if (ch->enabled && ch->mediatype == CHTYPE_VIDEO)
+		if (dev->hw_ops->uses_legacy_xdma_pipeline && ch->enabled && ch->mediatype == CHTYPE_VIDEO)
 			sc0710_dma_channel_untarget_all(ch);
 	}
 	mutex_unlock(&dev->kthread_dma_lock);
