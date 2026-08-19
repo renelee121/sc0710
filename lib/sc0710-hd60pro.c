@@ -31,6 +31,12 @@ module_param_named(hd60pro_experimental_mailbox,
 MODULE_PARM_DESC(hd60pro_experimental_mailbox,
 		 "Allow one manual HD60 Pro mailbox experiment per probe");
 
+static bool hd60pro_active_control;
+module_param_named(hd60pro_active_control,
+		   hd60pro_active_control, bool, 0400);
+MODULE_PARM_DESC(hd60pro_active_control,
+		 "Request future HD60 Pro active control-plane mode; inert in G4-B3.7");
+
 
 struct sc0710_hd60pro_reg {
 	u8 bar;
@@ -1360,6 +1366,9 @@ static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 	seq_puts(s, "mailbox_protocol=reverse-engineered\n");
 	seq_printf(s, "experimental_mailbox_opt_in=%u\n",
 		   READ_ONCE(hd60pro_experimental_mailbox));
+
+	seq_printf(s, "active_control_opt_in=%u\n",
+		   READ_ONCE(hd60pro_active_control));
 
 	seq_printf(s, "signal_hdmi_hpd=%u\n",
 		   HD60PRO_SIGNAL_HDMI_HPD);
