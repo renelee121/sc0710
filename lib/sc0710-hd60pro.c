@@ -487,6 +487,53 @@ sc0710_hd60pro_reset_control_state(struct sc0710_hd60pro_state *state)
 	state->control.last_error = 0;
 }
 
+/*
+ * Caller must hold state->mailbox_lock.
+ *
+ * This is a pure active-control admission check. It may read PCI
+ * configuration state, but it must not repair or modify hardware state.
+ */
+static int __maybe_unused
+sc0710_hd60pro_validate_active_context_locked(
+	struct sc0710_dev *dev,
+	struct sc0710_hd60pro_state *state)
+{
+	u16 command;
+	int ret;
+
+	if (!READ_ONCE(hd60pro_active_control))
+		return -EPERM;
+
+	if (!dev || !dev->pci || !state || READ_ONCE(dev->disconnected))
+		return -ENODEV;
+
+	if (dev->board != SC0710_BOARD_ELGATO_HD60_PRO ||
+	    dev->hw_ops != &sc0710_hd60pro_ops ||
+	    dev->observational_only ||
+	    dev->pci->vendor != 0x12ab || dev->pci->device != 0x0380 ||
+	    dev->pci->subsystem_vendor != 0x1cfa ||
+	    dev->pci->subsystem_device != 0x0006)
+		return -EPERM;
+
+	if (dev->irq_requested || dev->kthread_dma || dev->kthread_hdmi)
+		return -EBUSY;
+
+	if (state->control.phase != HD60PRO_CONTROL_IDLE)
+		return -EBUSY;
+
+	ret = sc0710_hd60pro_read_pci_command(dev->pci, &command);
+	if (ret)
+		return ret;
+
+	if (!(command & PCI_COMMAND_MEMORY))
+		return -EIO;
+
+	if (command & PCI_COMMAND_MASTER)
+		return -EIO;
+
+	return 0;
+}
+
 static int
 sc0710_hd60pro_validate_manual_context_locked(
 	struct sc0710_dev *dev,
