@@ -1447,7 +1447,8 @@ static int sc0710_start_streaming(struct vb2_queue *q, unsigned int count)
 	 * without it a resync between the refcount increment and the resize
 	 * could start the channel first, and the resize would then skip a
 	 * running channel and stream from a stale ring. */
-	if (refcount == 1 && dev->fmt != NULL) {
+	if (!READ_ONCE(dev->observational_only) &&
+            refcount == 1 && dev->fmt != NULL) {
 		mutex_lock(&dev->kthread_dma_lock);
 		if (READ_ONCE(dev->disconnected)) {
 			ret = -ENODEV;
@@ -1502,7 +1503,8 @@ static void sc0710_stop_streaming(struct vb2_queue *q)
 		 * engines are stopped, the BARs may be unmapped): only the
 		 * software teardown below remains ours. */
 		if (!READ_ONCE(dev->disconnected)) {
-			dev->hw_ops->capture_stop(dev);
+			if (!READ_ONCE(dev->observational_only))
+                                dev->hw_ops->capture_stop(dev);
 			/* Point the chains back at the scratch ring: vb2 is
 			 * about to unmap the client's buffers, and no
 			 * descriptor may retain their DMA addresses (the stop
