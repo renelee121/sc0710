@@ -531,8 +531,23 @@ struct sc0710_hd60pro_i2c_result {
 	struct sc0710_hd60pro_mailbox_snapshot after;
 };
 
+enum sc0710_hd60pro_control_phase {
+	HD60PRO_CONTROL_IDLE = 0,
+	HD60PRO_CONTROL_BOOTSTRAP,
+	HD60PRO_CONTROL_RESET,
+	HD60PRO_CONTROL_FRONTEND_CONFIG,
+	HD60PRO_CONTROL_READY,
+	HD60PRO_CONTROL_FAILED,
+};
+
+struct sc0710_hd60pro_control_state {
+	enum sc0710_hd60pro_control_phase phase;
+	int last_error;
+};
+
 struct sc0710_hd60pro_state {
 	struct mutex mailbox_lock;
+	struct sc0710_hd60pro_control_state control;
 	bool attempt_consumed;
 	bool in_progress;
 	struct sc0710_hd60pro_signal_result signal;

@@ -385,6 +385,34 @@ sc0710_hd60pro_reset_i2c_result(struct sc0710_hd60pro_state *state)
 	state->i2c.reg = HD60PRO_I2C_EXPERIMENT_DEFAULT_REG;
 }
 
+static const char *
+sc0710_hd60pro_control_phase_name(enum sc0710_hd60pro_control_phase phase)
+{
+	switch (phase) {
+	case HD60PRO_CONTROL_IDLE:
+		return "idle";
+	case HD60PRO_CONTROL_BOOTSTRAP:
+		return "bootstrap";
+	case HD60PRO_CONTROL_RESET:
+		return "reset";
+	case HD60PRO_CONTROL_FRONTEND_CONFIG:
+		return "frontend-config";
+	case HD60PRO_CONTROL_READY:
+		return "ready";
+	case HD60PRO_CONTROL_FAILED:
+		return "failed";
+	default:
+		return "unknown";
+	}
+}
+
+static void
+sc0710_hd60pro_reset_control_state(struct sc0710_hd60pro_state *state)
+{
+	state->control.phase = HD60PRO_CONTROL_IDLE;
+	state->control.last_error = 0;
+}
+
 static int
 sc0710_hd60pro_validate_manual_context_locked(
 	struct sc0710_dev *dev,
@@ -1242,6 +1270,12 @@ static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "bus_master=%u\n",
 		   !!(command & PCI_COMMAND_MASTER));
 
+	seq_printf(s, "control_phase=%s\n",
+			   sc0710_hd60pro_control_phase_name(
+				   dev->hd60pro_state.control.phase));
+	seq_printf(s, "control_last_error=%d\n",
+			   dev->hd60pro_state.control.last_error);
+
 	if (READ_ONCE(hd60pro_experimental_mailbox)) {
 		seq_puts(s, "mode=observational-with-manual-mailbox-opt-in\n");
 		seq_puts(s, "mmio_writes=experimental-manual-only\n");
@@ -1306,6 +1340,7 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 	pci_clear_master(pci_dev);
 
 	mutex_init(&dev->hd60pro_state.mailbox_lock);
+	sc0710_hd60pro_reset_control_state(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_experiment_result(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_clear_result(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_i2c_result(&dev->hd60pro_state);
