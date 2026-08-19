@@ -1440,6 +1440,7 @@ sc0710_hd60pro_capture_service(struct sc0710_dev *dev)
 
 const struct sc0710_hw_ops sc0710_hd60pro_ops = {
         .uses_legacy_xdma_pipeline = false,
+        .exposes_passive_video     = true,
 	.init			= sc0710_hd60pro_probe,
 	.fini			= sc0710_hd60pro_remove,
 	.capture_prepare	= sc0710_hd60pro_capture_unsupported,

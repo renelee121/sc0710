@@ -284,6 +284,7 @@ static void sc0710_legacy_backend_fini(struct sc0710_dev *dev)
 
 static const struct sc0710_hw_ops sc0710_legacy_ops = {
         .uses_legacy_xdma_pipeline = true,
+        .exposes_passive_video     = false,
 	.init			= sc0710_legacy_backend_init,
 	.fini			= sc0710_legacy_backend_fini,
 	.capture_prepare	= sc0710_dma_channels_resize,
@@ -1152,6 +1153,17 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 	if (dev->observational_only) {
 		pci_set_drvdata(pci_dev, dev);
 
+		if (dev->hw_ops->exposes_passive_video) {
+		        sc0710_channel_init_common(&dev->channel[0], dev, 0,
+		                                   CHDIR_INPUT, CHTYPE_VIDEO);
+
+		        err = sc0710_video_register(&dev->channel[0]);
+		        if (err) {
+		                pci_set_drvdata(pci_dev, NULL);
+		                goto fail_backend;
+		        }
+		}
+
 		mutex_lock(&devlist);
 		list_add_tail(&dev->devlist, &sc0710_devlist);
 		mutex_unlock(&devlist);
@@ -1207,11 +1219,24 @@ static void sc0710_finidev(struct pci_dev *pci_dev)
 	int i;
 
 	if (dev->observational_only) {
+		/* Serialize with STREAMOFF/release before publishing disconnect. */
+		mutex_lock(&dev->kthread_dma_lock);
 		WRITE_ONCE(dev->disconnected, true);
+		mutex_unlock(&dev->kthread_dma_lock);
 
 		mutex_lock(&devlist);
 		list_del(&dev->devlist);
 		mutex_unlock(&devlist);
+
+		if (dev->hw_ops->exposes_passive_video) {
+		        /* Refuse new opens before draining existing users. */
+		        sc0710_video_unregister(&dev->channel[0]);
+
+		        mutex_lock(&dev->signalMutex);
+		        mutex_unlock(&dev->signalMutex);
+
+		        sc0710_video_disconnect(&dev->channel[0]);
+		}
 
 		dev->hw_ops->fini(dev);
 		sc0710_dev_unregister(dev);

@@ -160,6 +160,12 @@ struct sc0710_hw_ops {
      */
     bool uses_legacy_xdma_pipeline;
 
+    /*
+     * True when an observational backend may expose channel 0 as
+     * a software-only V4L2 capture node without active capture.
+     */
+    bool exposes_passive_video;
+
 	int  (*init)(struct sc0710_dev *dev);
 	void (*fini)(struct sc0710_dev *dev);
 
