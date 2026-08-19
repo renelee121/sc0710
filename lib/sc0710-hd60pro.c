@@ -475,6 +475,39 @@ static bool sc0710_hd60pro_i2c_reg_is_whitelisted(u32 reg)
 }
 
 static int
+sc0710_hd60pro_validate_mailbox_request(
+	const struct sc0710_hd60pro_mailbox_request *request)
+{
+	if (!request)
+		return -EINVAL;
+
+	/*
+	 * Keep the active protocol surface restricted to transactions recovered
+	 * from the Windows driver and explicitly selected for one-shot testing.
+	 */
+	switch (request->command) {
+	case HD60PRO_CMD_SIGNAL_READ:
+		if (request->word2 != BIT(HD60PRO_SIGNAL_HDMI_HPD) ||
+		    request->word3 != 0 ||
+		    request->response_offset != HD60PRO_BAR0_MAILBOX_RESPONSE0)
+			return -EPERM;
+		break;
+
+	case HD60PRO_CMD_I2C_READ_REG8:
+		if (request->word2 != HD60PRO_I2C_VIDEO_FRONTEND_ADDR_8BIT ||
+		    !sc0710_hd60pro_i2c_reg_is_whitelisted(request->word3) ||
+		    request->response_offset != HD60PRO_BAR0_MAILBOX_RESPONSE1)
+			return -EPERM;
+		break;
+
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
+
+static int
 sc0710_hd60pro_mailbox_transaction_locked(
 	struct sc0710_dev *dev,
 	const struct sc0710_hd60pro_mailbox_request *request,
@@ -499,26 +532,9 @@ sc0710_hd60pro_mailbox_transaction_locked(
 	result->after = *before;
 	result->last_poll_status = before->mailbox_status;
 
-	/*
-	 * Keep the active protocol surface restricted to transactions recovered
-	 * from the Windows driver and explicitly selected for one-shot testing.
-	 */
-	switch (request->command) {
-	case HD60PRO_CMD_SIGNAL_READ:
-		if (request->word2 != BIT(HD60PRO_SIGNAL_HDMI_HPD) ||
-		    request->word3 != 0 ||
-		    request->response_offset != HD60PRO_BAR0_MAILBOX_RESPONSE0)
-			return -EPERM;
-		break;
-	case HD60PRO_CMD_I2C_READ_REG8:
-		if (request->word2 != HD60PRO_I2C_VIDEO_FRONTEND_ADDR_8BIT ||
-		    !sc0710_hd60pro_i2c_reg_is_whitelisted(request->word3) ||
-		    request->response_offset != HD60PRO_BAR0_MAILBOX_RESPONSE1)
-			return -EPERM;
-		break;
-	default:
-		return -EOPNOTSUPP;
-	}
+	ret = sc0710_hd60pro_validate_mailbox_request(request);
+	if (ret)
+		return ret;
 
 	started_ns = ktime_get_ns();
 
