@@ -1181,11 +1181,19 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 	 * XDMA setup.
 	 */
 	if (!dev->hw_ops->uses_legacy_xdma_pipeline) {
-	        printk(KERN_ERR
-	               "%s: backend has no active non-XDMA pipeline yet; refusing legacy XDMA fall-through\n",
-	               dev->name);
-	        err = -EOPNOTSUPP;
-	        goto fail_backend;
+		if (!dev->hw_ops->active_bringup) {
+			printk(KERN_ERR
+			       "%s: backend has no active non-XDMA pipeline; refusing active bring-up\n",
+			       dev->name);
+			err = -EOPNOTSUPP;
+			goto fail_backend;
+		}
+
+		err = dev->hw_ops->active_bringup(dev);
+		if (err)
+			goto fail_backend;
+
+		return 0;
 	}
 
         err = sc0710_legacy_active_bringup(dev, __func__);

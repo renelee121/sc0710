@@ -1419,6 +1419,22 @@ void sc0710_hd60pro_remove(struct sc0710_dev *dev)
 }
 
 static int
+sc0710_hd60pro_active_bringup_unsupported(struct sc0710_dev *dev)
+{
+	if (!dev || !dev->pci)
+		return -ENODEV;
+
+	/*
+	 * G4-B3 establishes only the architectural control-plane boundary.
+	 * No frontend writes, DMA ownership, IRQ setup or capture START are
+	 * authorized here yet.
+	 */
+	pci_clear_master(dev->pci);
+
+	return -EOPNOTSUPP;
+}
+
+static int
 sc0710_hd60pro_capture_unsupported(struct sc0710_dev *dev)
 {
 	if (!dev || !dev->pci)
@@ -1459,6 +1475,7 @@ const struct sc0710_hw_ops sc0710_hd60pro_ops = {
         .exposes_passive_video     = true,
 	.init			= sc0710_hd60pro_probe,
 	.fini			= sc0710_hd60pro_remove,
+	.active_bringup		= sc0710_hd60pro_active_bringup_unsupported,
 	.capture_prepare	= sc0710_hd60pro_capture_unsupported,
 	.capture_start		= sc0710_hd60pro_capture_unsupported,
 	.capture_stop		= sc0710_hd60pro_capture_stop,

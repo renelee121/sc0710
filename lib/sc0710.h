@@ -169,6 +169,13 @@ struct sc0710_hw_ops {
 	int  (*init)(struct sc0710_dev *dev);
 	void (*fini)(struct sc0710_dev *dev);
 
+	/*
+	 * Optional complete active bring-up entry for non-legacy backends.
+	 * It is never called for observational-only operation or for the
+	 * original XDMA pipeline.
+	 */
+	int  (*active_bringup)(struct sc0710_dev *dev);
+
 	int  (*capture_prepare)(struct sc0710_dev *dev);
 	int  (*capture_start)(struct sc0710_dev *dev);
 	void (*capture_stop)(struct sc0710_dev *dev);
