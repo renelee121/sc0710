@@ -493,7 +493,7 @@ sc0710_hd60pro_reset_control_state(struct sc0710_hd60pro_state *state)
  * This is a pure active-control admission check. It may read PCI
  * configuration state, but it must not repair or modify hardware state.
  */
-static int __maybe_unused
+static int
 sc0710_hd60pro_validate_active_context_locked(
 	struct sc0710_dev *dev,
 	struct sc0710_hd60pro_state *state)
@@ -1582,15 +1582,30 @@ void sc0710_hd60pro_remove(struct sc0710_dev *dev)
 static int
 sc0710_hd60pro_active_bringup_unsupported(struct sc0710_dev *dev)
 {
+	struct sc0710_hd60pro_state *state;
+	int ret;
+
 	if (!dev || !dev->pci)
 		return -ENODEV;
 
+	state = &dev->hd60pro_state;
+
 	/*
-	 * G4-B3 establishes only the architectural control-plane boundary.
-	 * No frontend writes, DMA ownership, IRQ setup or capture START are
-	 * authorized here yet.
+	 * B3.10 admits the active path only through the dedicated context
+	 * firewall. No control transition or frontend operation is authorized.
+	 */
+	mutex_lock(&state->mailbox_lock);
+	ret = sc0710_hd60pro_validate_active_context_locked(dev, state);
+
+	/*
+	 * Preserve the existing fail-closed BME invariant on every return path.
+	 * The validator itself remains a pure admission check.
 	 */
 	pci_clear_master(dev->pci);
+	mutex_unlock(&state->mailbox_lock);
+
+	if (ret)
+		return ret;
 
 	return -EOPNOTSUPP;
 }
