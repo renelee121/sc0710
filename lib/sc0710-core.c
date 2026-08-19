@@ -283,6 +283,7 @@ static void sc0710_legacy_backend_fini(struct sc0710_dev *dev)
 }
 
 static const struct sc0710_hw_ops sc0710_legacy_ops = {
+        .uses_legacy_xdma_pipeline = true,
 	.init			= sc0710_legacy_backend_init,
 	.fini			= sc0710_legacy_backend_fini,
 	.capture_prepare	= sc0710_dma_channels_resize,
@@ -1031,6 +1032,23 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 		mutex_unlock(&devlist);
 
 		return 0;
+	}
+
+	/*
+	 * Everything below this point is still the original 0x0710 XDMA
+	 * active pipeline. Non-legacy backends must gain their own explicit
+	 * active bring-up path before they are allowed past this boundary.
+	 *
+	 * observational_only=false must never be sufficient by itself to
+	 * make an MZ0380/HD60 Pro execute legacy PCI bus-master, IRQ or
+	 * XDMA setup.
+	 */
+	if (!dev->hw_ops->uses_legacy_xdma_pipeline) {
+	        printk(KERN_ERR
+	               "%s: backend has no active non-XDMA pipeline yet; refusing legacy XDMA fall-through\n",
+	               dev->name);
+	        err = -EOPNOTSUPP;
+	        goto fail_backend;
 	}
 
 	pci_set_master(pci_dev);

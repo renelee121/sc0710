@@ -152,6 +152,14 @@ struct sc0710_subid {
 struct sc0710_dev;
 
 struct sc0710_hw_ops {
+    /*
+     * True only for backends that use the original 0x0710 XDMA active
+     * pipeline in sc0710-core.c. A backend with this false must never fall
+     * through into pci_set_master(), legacy XDMA allocation or legacy IRQ
+     * setup merely because it leaves observational mode.
+     */
+    bool uses_legacy_xdma_pipeline;
+
 	int  (*init)(struct sc0710_dev *dev);
 	void (*fini)(struct sc0710_dev *dev);
 
