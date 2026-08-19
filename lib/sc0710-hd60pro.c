@@ -406,6 +406,34 @@ sc0710_hd60pro_control_phase_name(enum sc0710_hd60pro_control_phase phase)
 	}
 }
 
+static bool __maybe_unused
+sc0710_hd60pro_control_transition_allowed(
+	enum sc0710_hd60pro_control_phase from,
+	enum sc0710_hd60pro_control_phase to)
+{
+	switch (from) {
+	case HD60PRO_CONTROL_IDLE:
+		return to == HD60PRO_CONTROL_BOOTSTRAP;
+
+	case HD60PRO_CONTROL_BOOTSTRAP:
+		return to == HD60PRO_CONTROL_RESET ||
+		       to == HD60PRO_CONTROL_FAILED;
+
+	case HD60PRO_CONTROL_RESET:
+		return to == HD60PRO_CONTROL_FRONTEND_CONFIG ||
+		       to == HD60PRO_CONTROL_FAILED;
+
+	case HD60PRO_CONTROL_FRONTEND_CONFIG:
+		return to == HD60PRO_CONTROL_READY ||
+		       to == HD60PRO_CONTROL_FAILED;
+
+	case HD60PRO_CONTROL_READY:
+	case HD60PRO_CONTROL_FAILED:
+	default:
+		return false;
+	}
+}
+
 static void
 sc0710_hd60pro_reset_control_state(struct sc0710_hd60pro_state *state)
 {
