@@ -1408,7 +1408,7 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 	struct dentry *entry;
 	int ret;
 
-	dev->observational_only = true;
+	dev->observational_only = !READ_ONCE(hd60pro_active_control);
 
 	/*
 	 * The HD60 Pro may retain DMA state across driver sessions.
@@ -1498,8 +1498,9 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 		goto err_debugfs;
 	}
 
-	pr_info("%s: HD60 Pro attached in observational-only mode\n",
-		dev->name);
+	pr_info("%s: HD60 Pro attached in %s mode\n",
+		dev->name,
+		dev->observational_only ? "observational-only" : "active-control");
 	pr_info("%s: BAR0 size=0x%llx, BAR5 size=0x%llx\n",
 		dev->name,
 		(unsigned long long)pci_resource_len(pci_dev, 0),
@@ -1526,8 +1527,9 @@ void sc0710_hd60pro_remove(struct sc0710_dev *dev)
 
 	pci_clear_master(dev->pci);
 
-	pr_info("%s: HD60 Pro observational backend detached\n",
-		dev->name);
+	pr_info("%s: HD60 Pro %s backend detached\n",
+		dev->name,
+		dev->observational_only ? "observational" : "active-control");
 }
 
 static int
