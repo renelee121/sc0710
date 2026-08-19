@@ -434,6 +434,46 @@ sc0710_hd60pro_control_transition_allowed(
 	}
 }
 
+/*
+ * Caller must hold state->mailbox_lock.
+ *
+ * Future active control-plane operations will keep the state transition in
+ * the same critical section as the mailbox transaction that justifies it.
+ * This helper deliberately does not acquire the mutex itself.
+ */
+static int __maybe_unused
+sc0710_hd60pro_control_transition_locked(
+	struct sc0710_hd60pro_state *state,
+	enum sc0710_hd60pro_control_phase to,
+	int last_error)
+{
+	enum sc0710_hd60pro_control_phase from;
+
+	if (!state)
+		return -EINVAL;
+
+	from = state->control.phase;
+
+	if (!sc0710_hd60pro_control_transition_allowed(from, to))
+		return -EPERM;
+
+	if (to == HD60PRO_CONTROL_FAILED) {
+		if (last_error >= 0)
+			return -EINVAL;
+	} else if (last_error) {
+		return -EINVAL;
+	}
+
+	/*
+	 * phase is the commit point for the new control-plane state.
+	 * Readers of this state already serialize on mailbox_lock.
+	 */
+	state->control.last_error = last_error;
+	state->control.phase = to;
+
+	return 0;
+}
+
 static void
 sc0710_hd60pro_reset_control_state(struct sc0710_hd60pro_state *state)
 {
