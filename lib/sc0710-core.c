@@ -927,12 +927,135 @@ static void sc0710_restore_pci_decode_state(struct sc0710_dev *dev)
                 pci_name(dev->pci), command, restored);
 }
 
+static int sc0710_legacy_active_bringup(struct sc0710_dev *dev,
+                                        const char *caller)
+{
+        struct pci_dev *pci_dev = dev->pci;
+        int err, i;
+
+	pci_set_master(pci_dev);
+
+	/* The vendor design is pure polling and never arms the XDMA IRQ block,
+	 * but the hardware delivers MSI once the block is armed: the
+	 * interrupt-driven service wakes the DMA thread per completed chain
+	 * and demotes polling to a watchdog tick. MSI only - a shared INTx
+	 * line with a wake-only handler would mask co-devices. */
+	if (irq_service) {
+		if (pci_alloc_irq_vectors(pci_dev, 1, 1, PCI_IRQ_MSI) == 1 &&
+		    pci_request_irq(pci_dev, 0, sc0710_irq, NULL, dev,
+				    "%s", dev->name) == 0) {
+			dev->irq_requested = true;
+			dev->irq_service_active = true;
+			printk(KERN_INFO "%s: interrupt-driven DMA service: MSI, irq %d\n",
+				dev->name, pci_irq_vector(pci_dev, 0));
+		} else {
+			pci_free_irq_vectors(pci_dev);
+			printk(KERN_WARNING "%s: could not request the interrupt line (MSI), falling back to polling\n",
+				dev->name);
+		}
+	}
+
+	/* Card specific tweaks with subsystems etc. On the 4K Pro this
+	 * includes programming the ECP5 video-frontend FPGA; if that fails,
+	 * fail the probe: binding is the driver's statement that the card can
+	 * capture. */
+	err = sc0710_card_setup(dev);
+	if (err < 0) {
+		printk(KERN_ERR "%s: card setup failed (%d), aborting probe\n",
+			dev->name, err);
+		return err;
+	}
+
+	pci_set_drvdata(pci_dev, dev);
+
+	/* Sync module param → per-device preference before I2C bring-up. */
+	if (color_deep < 0 || color_deep > 2)
+		color_deep = 2;
+	dev->color_deep = color_deep;
+
+	printk(KERN_INFO "sc0710 device at %s\n", pci_name(pci_dev));
+	printk(KERN_INFO "sc0710 page-size %lu bytes\n", PAGE_SIZE);
+
+	err = sc0710_dma_channels_alloc(dev);
+	if (err < 0) {
+		printk(KERN_ERR "%s: DMA channel allocation failed (%d), aborting probe\n",
+			dev->name, err);
+		return err;
+	}
+
+	sc0710_i2c_initialize(dev);
+
+	/* Register the user-facing device nodes last: a registered node can be
+	 * held open (udev probes every new node), so nothing in probe may fail
+	 * after this point or an open fd outlives the kfree below. That is also
+	 * why audio registration and the kthread starts stay non-fatal. */
+	for (i = 0; i < SC0710_MAX_CHANNELS; i++) {
+		struct sc0710_dma_channel *ch = &dev->channel[i];
+
+		if (!ch->enabled)
+			continue;
+		if (ch->mediatype == CHTYPE_VIDEO) {
+			err = sc0710_video_register(ch);
+			if (err < 0) {
+				printk(KERN_ERR "%s: video registration failed (%d), aborting probe\n",
+					dev->name, err);
+				return err;
+			}
+		} else if (ch->mediatype == CHTYPE_AUDIO) {
+			/* Audio is optional: video capture works without ALSA. */
+			if (sc0710_audio_register(dev) < 0)
+				printk(KERN_WARNING "%s: audio registration failed, continuing without audio\n",
+					dev->name);
+		}
+	}
+
+	/* Put this in a global list so we can track multiple boards */
+	mutex_lock(&devlist);
+	list_add_tail(&dev->devlist, &sc0710_devlist);
+	mutex_unlock(&devlist);
+
+	dev->kthread_hdmi = kthread_run(sc0710_thread_hdmi_function, dev, "sc0710 hdmi");
+	if (IS_ERR(dev->kthread_hdmi)) {
+		printk(KERN_ERR "%s() Failed to create "
+			"hdmi kernel thread (%ld)\n", caller, PTR_ERR(dev->kthread_hdmi));
+		dev->kthread_hdmi = NULL;
+	} else
+		dprintk(1, "%s() Created the HDMI thread\n", caller);
+
+	dev->kthread_dma = kthread_run(sc0710_thread_dma_function, dev, "sc0710 dma");
+	if (IS_ERR(dev->kthread_dma)) {
+		printk(KERN_ERR "%s() Failed to create "
+			"dma kernel thread (%ld)\n", caller, PTR_ERR(dev->kthread_dma));
+		dev->kthread_dma = NULL;
+	} else
+		dprintk(1, "%s() Created the DMA thread\n", caller);
+
+	if (dev->board == SC0710_BOARD_ELGATEO_4KP60_MK2) {
+		err = device_create_bin_file(&pci_dev->dev, &bin_attr_hdr_tonemap);
+		if (err < 0)
+			printk(KERN_WARNING "%s: hdr_tonemap sysfs attr unavailable (%d)\n",
+				dev->name, err);
+		else
+			printk(KERN_INFO "%s: HDR tonemap LUT via sysfs hdr_tonemap (1024 bytes)\n",
+				dev->name);
+		err = device_create_file(&pci_dev->dev, &dev_attr_color_deep);
+		if (err < 0)
+			printk(KERN_WARNING "%s: color_deep sysfs attr unavailable (%d)\n",
+				dev->name, err);
+		else
+			printk(KERN_INFO "%s: color_deep via sysfs (0=8bit 1=10bit 2=auto)\n",
+				dev->name);
+	}
+
+	return 0;
+}
+
 static int sc0710_initdev(struct pci_dev *pci_dev,
 	const struct pci_device_id *pci_id)
 {
 	struct sc0710_dev *dev;
 	bool backend_initialized = false;
-	int err, i;
+	int err;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (NULL == dev)
@@ -1053,121 +1176,11 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 	        goto fail_backend;
 	}
 
-	pci_set_master(pci_dev);
+        err = sc0710_legacy_active_bringup(dev, __func__);
+        if (err)
+                goto fail_backend;
 
-	/* The vendor design is pure polling and never arms the XDMA IRQ block,
-	 * but the hardware delivers MSI once the block is armed: the
-	 * interrupt-driven service wakes the DMA thread per completed chain
-	 * and demotes polling to a watchdog tick. MSI only - a shared INTx
-	 * line with a wake-only handler would mask co-devices. */
-	if (irq_service) {
-		if (pci_alloc_irq_vectors(pci_dev, 1, 1, PCI_IRQ_MSI) == 1 &&
-		    pci_request_irq(pci_dev, 0, sc0710_irq, NULL, dev,
-				    "%s", dev->name) == 0) {
-			dev->irq_requested = true;
-			dev->irq_service_active = true;
-			printk(KERN_INFO "%s: interrupt-driven DMA service: MSI, irq %d\n",
-				dev->name, pci_irq_vector(pci_dev, 0));
-		} else {
-			pci_free_irq_vectors(pci_dev);
-			printk(KERN_WARNING "%s: could not request the interrupt line (MSI), falling back to polling\n",
-				dev->name);
-		}
-	}
-
-	/* Card specific tweaks with subsystems etc. On the 4K Pro this
-	 * includes programming the ECP5 video-frontend FPGA; if that fails,
-	 * fail the probe: binding is the driver's statement that the card can
-	 * capture. */
-	err = sc0710_card_setup(dev);
-	if (err < 0) {
-		printk(KERN_ERR "%s: card setup failed (%d), aborting probe\n",
-			dev->name, err);
-		goto fail_backend;
-	}
-
-	pci_set_drvdata(pci_dev, dev);
-
-	/* Sync module param → per-device preference before I2C bring-up. */
-	if (color_deep < 0 || color_deep > 2)
-		color_deep = 2;
-	dev->color_deep = color_deep;
-
-	printk(KERN_INFO "sc0710 device at %s\n", pci_name(pci_dev));
-	printk(KERN_INFO "sc0710 page-size %lu bytes\n", PAGE_SIZE);
-
-	err = sc0710_dma_channels_alloc(dev);
-	if (err < 0) {
-		printk(KERN_ERR "%s: DMA channel allocation failed (%d), aborting probe\n",
-			dev->name, err);
-		goto fail_backend;
-	}
-
-	sc0710_i2c_initialize(dev);
-
-	/* Register the user-facing device nodes last: a registered node can be
-	 * held open (udev probes every new node), so nothing in probe may fail
-	 * after this point or an open fd outlives the kfree below. That is also
-	 * why audio registration and the kthread starts stay non-fatal. */
-	for (i = 0; i < SC0710_MAX_CHANNELS; i++) {
-		struct sc0710_dma_channel *ch = &dev->channel[i];
-
-		if (!ch->enabled)
-			continue;
-		if (ch->mediatype == CHTYPE_VIDEO) {
-			err = sc0710_video_register(ch);
-			if (err < 0) {
-				printk(KERN_ERR "%s: video registration failed (%d), aborting probe\n",
-					dev->name, err);
-				goto fail_backend;
-			}
-		} else if (ch->mediatype == CHTYPE_AUDIO) {
-			/* Audio is optional: video capture works without ALSA. */
-			if (sc0710_audio_register(dev) < 0)
-				printk(KERN_WARNING "%s: audio registration failed, continuing without audio\n",
-					dev->name);
-		}
-	}
-
-	/* Put this in a global list so we can track multiple boards */
-	mutex_lock(&devlist);
-	list_add_tail(&dev->devlist, &sc0710_devlist);
-	mutex_unlock(&devlist);
-
-	dev->kthread_hdmi = kthread_run(sc0710_thread_hdmi_function, dev, "sc0710 hdmi");
-	if (IS_ERR(dev->kthread_hdmi)) {
-		printk(KERN_ERR "%s() Failed to create "
-			"hdmi kernel thread (%ld)\n", __func__, PTR_ERR(dev->kthread_hdmi));
-		dev->kthread_hdmi = NULL;
-	} else
-		dprintk(1, "%s() Created the HDMI thread\n", __func__);
-
-	dev->kthread_dma = kthread_run(sc0710_thread_dma_function, dev, "sc0710 dma");
-	if (IS_ERR(dev->kthread_dma)) {
-		printk(KERN_ERR "%s() Failed to create "
-			"dma kernel thread (%ld)\n", __func__, PTR_ERR(dev->kthread_dma));
-		dev->kthread_dma = NULL;
-	} else
-		dprintk(1, "%s() Created the DMA thread\n", __func__);
-
-	if (dev->board == SC0710_BOARD_ELGATEO_4KP60_MK2) {
-		err = device_create_bin_file(&pci_dev->dev, &bin_attr_hdr_tonemap);
-		if (err < 0)
-			printk(KERN_WARNING "%s: hdr_tonemap sysfs attr unavailable (%d)\n",
-				dev->name, err);
-		else
-			printk(KERN_INFO "%s: HDR tonemap LUT via sysfs hdr_tonemap (1024 bytes)\n",
-				dev->name);
-		err = device_create_file(&pci_dev->dev, &dev_attr_color_deep);
-		if (err < 0)
-			printk(KERN_WARNING "%s: color_deep sysfs attr unavailable (%d)\n",
-				dev->name, err);
-		else
-			printk(KERN_INFO "%s: color_deep via sysfs (0=8bit 1=10bit 2=auto)\n",
-				dev->name);
-	}
-
-	return 0;
+        return 0;
 
 fail_backend:
 	if (backend_initialized)
