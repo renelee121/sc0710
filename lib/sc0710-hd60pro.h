@@ -34,6 +34,11 @@ enum hd60pro_bar5_register {
 };
 
 enum hd60pro_mailbox_opcode {
+	/*
+	 * MZ0380 bootstrap command reconstructed from the Windows driver.
+	 * Definition only: Linux execution remains unauthorized.
+	 */
+	HD60PRO_CMD_BOOTSTRAP		= 0x01,
 	HD60PRO_CMD_SIGNAL_READ		= 0x14,
 	HD60PRO_CMD_SIGNAL_WRITE	= 0x15,
 	HD60PRO_CMD_SIGNAL_CONFIG	= 0x17,
@@ -60,6 +65,13 @@ enum hd60pro_mcu_i2c_direction {
  */
 #define HD60PRO_MAILBOX_TRIGGER_VALUE		0x00000800U
 #define HD60PRO_IRQ_ACK_TRIGGER_VALUE		0x00000400U
+
+/*
+ * Windows MZ0380 bootstrap request arguments.
+ * These are protocol constants, not authorization to issue the request.
+ */
+#define HD60PRO_BOOTSTRAP_WORD2			0x00000800U
+#define HD60PRO_BOOTSTRAP_WORD3			0x00000001U
 
 #define HD60PRO_MAILBOX_STATUS_COMPLETE		0x00000001U
 #define HD60PRO_IRQ_STATUS_MAILBOX_COMPLETE	0x00000800U

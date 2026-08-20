@@ -545,9 +545,24 @@ struct sc0710_hd60pro_control_state {
 	int last_error;
 };
 
+/*
+ * Linux-side semantic bookkeeping for the reconstructed MZ0380 bootstrap.
+ *
+ * This deliberately does not model the Windows driver's private +0x2044
+ * storage location as hardware or MMIO. No bootstrap operation is
+ * executable merely because this state exists.
+ */
+struct sc0710_hd60pro_bootstrap_state {
+	bool attempt_consumed;
+	bool in_progress;
+	bool completed;
+	int last_error;
+};
+
 struct sc0710_hd60pro_state {
 	struct mutex mailbox_lock;
 	struct sc0710_hd60pro_control_state control;
+	struct sc0710_hd60pro_bootstrap_state bootstrap;
 	bool attempt_consumed;
 	bool in_progress;
 	struct sc0710_hd60pro_signal_result signal;

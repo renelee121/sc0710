@@ -487,6 +487,15 @@ sc0710_hd60pro_reset_control_state(struct sc0710_hd60pro_state *state)
 	state->control.last_error = 0;
 }
 
+static void
+sc0710_hd60pro_reset_bootstrap_state(struct sc0710_hd60pro_state *state)
+{
+	state->bootstrap.attempt_consumed = false;
+	state->bootstrap.in_progress = false;
+	state->bootstrap.completed = false;
+	state->bootstrap.last_error = 0;
+}
+
 /*
  * Caller must hold state->mailbox_lock.
  *
@@ -1465,6 +1474,7 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 
 	mutex_init(&dev->hd60pro_state.mailbox_lock);
 	sc0710_hd60pro_reset_control_state(&dev->hd60pro_state);
+	sc0710_hd60pro_reset_bootstrap_state(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_experiment_result(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_clear_result(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_i2c_result(&dev->hd60pro_state);
