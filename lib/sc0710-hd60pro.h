@@ -67,11 +67,18 @@ enum hd60pro_mcu_i2c_direction {
 #define HD60PRO_IRQ_ACK_TRIGGER_VALUE		0x00000400U
 
 /*
- * Windows MZ0380 bootstrap request arguments.
- * These are protocol constants, not authorization to issue the request.
+ * Windows MZ0380 bootstrap uses a two-dword helper buffer:
+ *
+ *   dword[0] = HD60PRO_MAILBOX_TRIGGER_VALUE
+ *   dword[1] = HD60PRO_CMD_BOOTSTRAP
+ *
+ * The Windows mailbox helper copies only dword[1] to BAR0+0x04 and then
+ * writes dword[0] to BAR0+0x00. Bootstrap therefore has no BAR0+0x08 or
+ * BAR0+0x0c payload words.
+ *
+ * Definition only: Linux execution remains unauthorized.
  */
-#define HD60PRO_BOOTSTRAP_WORD2			0x00000800U
-#define HD60PRO_BOOTSTRAP_WORD3			0x00000001U
+#define HD60PRO_BOOTSTRAP_REQUEST_DWORDS		2U
 
 #define HD60PRO_MAILBOX_STATUS_COMPLETE		0x00000001U
 #define HD60PRO_IRQ_STATUS_MAILBOX_COMPLETE	0x00000800U
