@@ -984,6 +984,76 @@ sc0710_hd60pro_preflight_bootstrap_locked(
 }
 
 /*
+ * Persist the final bootstrap state in the kernel log.
+ *
+ * A failed active probe tears debugfs down during unwind, so this record is
+ * intentionally emitted while the backend state and BAR mappings are still
+ * alive. Caller must hold state->mailbox_lock.
+ */
+static void __maybe_unused
+sc0710_hd60pro_log_bootstrap_result_locked(
+	struct sc0710_dev *dev,
+	struct sc0710_hd60pro_state *state,
+	int result)
+{
+	const struct sc0710_hd60pro_bootstrap_state *bootstrap;
+	u16 command = 0;
+	int command_ret;
+
+	if (!dev || !dev->pci || !state)
+		return;
+
+	bootstrap = &state->bootstrap;
+	command_ret = sc0710_hd60pro_read_pci_command(dev->pci, &command);
+
+	pr_info("%s: HD60 Pro bootstrap result=%d phase=%s "
+		"control_error=%d attempt_consumed=%u in_progress=%u "
+		"completed=%u mailbox_completed=%u late_completion=%u "
+		"polls=%u last_poll_status=0x%08x elapsed_us=%llu\n",
+		dev->name,
+		result,
+		sc0710_hd60pro_control_phase_name(state->control.phase),
+		state->control.last_error,
+		bootstrap->attempt_consumed,
+		bootstrap->in_progress,
+		bootstrap->completed,
+		bootstrap->mailbox_completed,
+		bootstrap->late_completion,
+		bootstrap->polls,
+		bootstrap->last_poll_status,
+		(unsigned long long)(bootstrap->elapsed_ns / 1000));
+
+	pr_info("%s: HD60 Pro bootstrap before_valid=%u "
+		"pci=0x%04x mailbox=0x%08x irq=0x%08x tag=0x%08x\n",
+		dev->name,
+		bootstrap->before_valid,
+		bootstrap->before.pci_command,
+		bootstrap->before.mailbox_status,
+		bootstrap->before.irq_status,
+		bootstrap->before.irq_tag);
+
+	pr_info("%s: HD60 Pro bootstrap after_valid=%u "
+		"pci=0x%04x mailbox=0x%08x irq=0x%08x tag=0x%08x\n",
+		dev->name,
+		bootstrap->after_valid,
+		bootstrap->after.pci_command,
+		bootstrap->after.mailbox_status,
+		bootstrap->after.irq_status,
+		bootstrap->after.irq_tag);
+
+	if (!command_ret)
+		pr_info("%s: HD60 Pro bootstrap final_pci_command=0x%04x "
+			"memory_space=%u bus_master=%u\n",
+			dev->name,
+			command,
+			!!(command & PCI_COMMAND_MEMORY),
+			!!(command & PCI_COMMAND_MASTER));
+	else
+		pr_info("%s: HD60 Pro bootstrap final_pci_command_error=%d\n",
+			dev->name, command_ret);
+}
+
+/*
  * Compose one complete Linux-side HD60 Pro bootstrap attempt.
  *
  * Caller must hold state->mailbox_lock.
@@ -1016,11 +1086,11 @@ sc0710_hd60pro_bootstrap_once_locked(
 
 	ret = sc0710_hd60pro_preflight_bootstrap_locked(dev, state);
 	if (ret)
-		return ret;
+		goto log_result;
 
 	ret = sc0710_hd60pro_begin_bootstrap_locked(state);
 	if (ret)
-		return ret;
+		goto log_result;
 
 	/*
 	 * PRE rearm is the first hardware operation after consuming the
@@ -1052,7 +1122,12 @@ post_rearm:
 		ret = post_ret;
 
 finish:
-	return sc0710_hd60pro_finish_bootstrap_locked(state, ret);
+	ret = sc0710_hd60pro_finish_bootstrap_locked(state, ret);
+
+log_result:
+	sc0710_hd60pro_log_bootstrap_result_locked(dev, state, ret);
+
+	return ret;
 }
 
 static int
