@@ -219,6 +219,61 @@ sc0710_hd60pro_ack_bar5_irq(struct sc0710_dev *dev)
 }
 
 /*
+ * Program the two BAR5 DWORDs written by the Windows MZ0380 bootstrap path.
+ *
+ * FUN_14028d254 stores the physical start of Windows MEMORY #0 at ctx+0x80.
+ * FUN_140278bb0 then writes:
+ *
+ *   BAR5+0x30 <- low32(ctx+0x80 + 0x04)
+ *   BAR5+0x38 <- low32(ctx+0x80 + 0x5f)
+ *
+ * For the HD60 Pro, Windows MEMORY #0 is PCI BAR0 and MEMORY #1 is PCI
+ * BAR5. Derive the values from the current PCI BAR0 assignment rather than
+ * hard-coding an observed physical address.
+ *
+ * Windows performs DWORD writes, so fail closed if BAR0+0x5f cannot be
+ * represented in 32 bits. Do not silently truncate a >4 GiB resource.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime path invokes this helper yet.
+ */
+static int __maybe_unused
+sc0710_hd60pro_program_bootstrap_bar5_locked(struct sc0710_dev *dev)
+{
+	resource_size_t bar0_phys;
+	resource_size_t bar0_size;
+	resource_size_t bar5_size;
+
+	if (!dev || !dev->pci || !dev->lmmio[1])
+		return -ENODEV;
+
+	bar0_phys = pci_resource_start(dev->pci, 0);
+	bar0_size = pci_resource_len(dev->pci, 0);
+	bar5_size = pci_resource_len(dev->pci, 5);
+
+	if (bar0_size <= HD60PRO_BOOTSTRAP_BAR0_PHYS_PLUS5F)
+		return -ERANGE;
+
+	if (bar5_size < sizeof(u32) ||
+	    HD60PRO_BAR5_BOOTSTRAP_REG38 > bar5_size - sizeof(u32))
+		return -ERANGE;
+
+	if (bar0_phys >
+	    0xffffffffULL - HD60PRO_BOOTSTRAP_BAR0_PHYS_PLUS5F)
+		return -ERANGE;
+
+	writel((u32)(bar0_phys + HD60PRO_BOOTSTRAP_BAR0_PHYS_PLUS4),
+	       (u8 __iomem *)dev->lmmio[1] +
+	       HD60PRO_BAR5_BOOTSTRAP_REG30);
+
+	writel((u32)(bar0_phys + HD60PRO_BOOTSTRAP_BAR0_PHYS_PLUS5F),
+	       (u8 __iomem *)dev->lmmio[1] +
+	       HD60PRO_BAR5_BOOTSTRAP_REG38);
+
+	return 0;
+}
+
+/*
  * Reconstructed Windows IRQ rearm sequence.
  *
  * Caller must hold state->mailbox_lock.
