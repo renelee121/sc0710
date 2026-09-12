@@ -630,6 +630,50 @@ sc0710_hd60pro_begin_bootstrap_locked(struct sc0710_hd60pro_state *state)
 }
 
 /*
+ * Finish a Linux-side bootstrap attempt after the hardware outcome is known.
+ *
+ * Caller must hold state->mailbox_lock. This helper changes only software
+ * bookkeeping and control-plane state; it performs no PCI or MMIO access.
+ *
+ * A successful bootstrap advances BOOTSTRAP -> RESET. A real bootstrap
+ * failure advances BOOTSTRAP -> FAILED and permanently consumes the attempt
+ * for the current driver lifetime.
+ */
+static int __maybe_unused
+sc0710_hd60pro_finish_bootstrap_locked(
+	struct sc0710_hd60pro_state *state,
+	int result)
+{
+	enum sc0710_hd60pro_control_phase next;
+	int ret;
+
+	if (!state)
+		return -EINVAL;
+
+	if (!state->bootstrap.attempt_consumed ||
+	    !state->bootstrap.in_progress)
+		return -EPERM;
+
+	if (state->control.phase != HD60PRO_CONTROL_BOOTSTRAP)
+		return -EPERM;
+
+	if (result > 0)
+		return -EINVAL;
+
+	next = result ? HD60PRO_CONTROL_FAILED : HD60PRO_CONTROL_RESET;
+
+	ret = sc0710_hd60pro_control_transition_locked(state, next, result);
+	if (ret)
+		return ret;
+
+	state->bootstrap.completed = !result;
+	state->bootstrap.last_error = result;
+	state->bootstrap.in_progress = false;
+
+	return result;
+}
+
+/*
  * Caller must hold state->mailbox_lock.
  *
  * This is a pure active-control admission check. It may read PCI
