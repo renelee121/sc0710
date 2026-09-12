@@ -1193,6 +1193,19 @@ static int sc0710_initdev(struct pci_dev *pci_dev,
 		if (err)
 			goto fail_backend;
 
+		/*
+		 * Publish a successfully brought-up non-XDMA backend only after
+		 * its backend-specific active control path has completed.
+		 *
+		 * Keep this common lifecycle bookkeeping in the core rather than
+		 * making individual hardware backends own PCI drvdata/devlist.
+		 */
+		pci_set_drvdata(pci_dev, dev);
+
+		mutex_lock(&devlist);
+		list_add_tail(&dev->devlist, &sc0710_devlist);
+		mutex_unlock(&devlist);
+
 		return 0;
 	}
 
