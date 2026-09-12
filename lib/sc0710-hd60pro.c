@@ -821,6 +821,85 @@ sc0710_hd60pro_validate_active_context_locked(
 	return 0;
 }
 
+/*
+ * Validate the passive snapshot required before the first bootstrap write.
+ *
+ * This is deliberately read-only. In particular, unlike the manual mailbox
+ * snapshot validator, this function must not clear PCI bus mastering or
+ * repair any other hardware state.
+ *
+ * Require an entirely quiescent mailbox/IRQ state so that a later observed
+ * mailbox COMPLETE bit can be attributed to the bootstrap request rather
+ * than to stale state that existed before it.
+ */
+static int
+sc0710_hd60pro_validate_bootstrap_snapshot(
+	const struct sc0710_hd60pro_mailbox_snapshot *snapshot)
+{
+	if (!snapshot)
+		return -EINVAL;
+
+	if (!(snapshot->pci_command & PCI_COMMAND_MEMORY))
+		return -EIO;
+
+	if (snapshot->pci_command & PCI_COMMAND_MASTER)
+		return -EIO;
+
+	if (snapshot->irq_status != 0)
+		return -EBUSY;
+
+	if (snapshot->mailbox_status != 0)
+		return -EBUSY;
+
+	return 0;
+}
+
+/*
+ * Perform the read-only admission/preflight for a bootstrap attempt.
+ *
+ * Caller must hold state->mailbox_lock. This function may read PCI/MMIO
+ * state and update Linux-side diagnostics, but it must not consume the
+ * one-shot bootstrap attempt, transition control state or write hardware.
+ */
+static int __maybe_unused
+sc0710_hd60pro_preflight_bootstrap_locked(
+	struct sc0710_dev *dev,
+	struct sc0710_hd60pro_state *state)
+{
+	int ret;
+
+	if (!state)
+		return -EINVAL;
+
+	ret = sc0710_hd60pro_validate_active_context_locked(dev, state);
+	if (ret)
+		return ret;
+
+	if (state->bootstrap.in_progress)
+		return -EBUSY;
+
+	if (state->bootstrap.attempt_consumed)
+		return -EALREADY;
+
+	/*
+	 * Do not expose partially-populated snapshot data as valid if any
+	 * individual read fails.
+	 */
+	state->bootstrap.before_valid = false;
+	memset(&state->bootstrap.before, 0,
+	       sizeof(state->bootstrap.before));
+
+	ret = sc0710_hd60pro_take_mailbox_snapshot(
+		dev, &state->bootstrap.before);
+	if (ret)
+		return ret;
+
+	state->bootstrap.before_valid = true;
+
+	return sc0710_hd60pro_validate_bootstrap_snapshot(
+		&state->bootstrap.before);
+}
+
 static int
 sc0710_hd60pro_validate_manual_context_locked(
 	struct sc0710_dev *dev,
