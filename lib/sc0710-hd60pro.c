@@ -172,6 +172,51 @@ sc0710_hd60pro_write_bar0(struct sc0710_dev *dev, u32 offset, u32 value)
 	return 0;
 }
 
+/*
+ * Specialized Windows rearm primitives.
+ *
+ * Definition only: these helpers deliberately have no runtime caller yet.
+ * Keep them narrower than the generic mailbox writer so the reconstructed
+ * IRQ rearm sequence cannot grow into an unrestricted MMIO write surface.
+ */
+static int __maybe_unused
+sc0710_hd60pro_clear_irq_status(struct sc0710_dev *dev)
+{
+	resource_size_t size;
+
+	if (!dev || !dev->pci || !dev->lmmio[0])
+		return -ENODEV;
+
+	size = pci_resource_len(dev->pci, 0);
+	if (size < sizeof(u32) ||
+	    HD60PRO_BAR0_IRQ_STATUS > size - sizeof(u32))
+		return -ERANGE;
+
+	writel(0, (u8 __iomem *)dev->lmmio[0] +
+	       HD60PRO_BAR0_IRQ_STATUS);
+
+	return 0;
+}
+
+static int __maybe_unused
+sc0710_hd60pro_ack_bar5_irq(struct sc0710_dev *dev)
+{
+	resource_size_t size;
+
+	if (!dev || !dev->pci || !dev->lmmio[1])
+		return -ENODEV;
+
+	size = pci_resource_len(dev->pci, 5);
+	if (size < sizeof(u32) ||
+	    HD60PRO_BAR5_IRQ_ACK > size - sizeof(u32))
+		return -ERANGE;
+
+	writel(HD60PRO_BAR5_IRQ_ACK_VALUE,
+	       (u8 __iomem *)dev->lmmio[1] + HD60PRO_BAR5_IRQ_ACK);
+
+	return 0;
+}
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
