@@ -26,7 +26,7 @@ enum hd60pro_bar0_register {
 };
 
 /*
- * The second Windows MMIO resource strongly correlates with PCI BAR5
+ * The second Windows translated MEMORY resource maps to PCI BAR5
  * on the HD60 Pro 12ab:0380 / 1cfa:0006.
  */
 enum hd60pro_bar5_register {
