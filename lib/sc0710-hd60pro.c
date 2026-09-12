@@ -1962,7 +1962,13 @@ static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "bootstrap_after_irq_tag=0x%08x\n",
 		   dev->hd60pro_state.bootstrap.after.irq_tag);
 
-	if (READ_ONCE(hd60pro_experimental_mailbox)) {
+	if (!dev->observational_only) {
+		seq_puts(s, "mode=active-control\n");
+		seq_puts(s, "active_bringup=unsupported\n");
+		seq_puts(s, "mmio_writes=disabled\n");
+		seq_puts(s, "mailbox_writes=disabled\n");
+		seq_puts(s, "i2c_reads=disabled\n");
+	} else if (READ_ONCE(hd60pro_experimental_mailbox)) {
 		seq_puts(s, "mode=observational-with-manual-mailbox-opt-in\n");
 		seq_puts(s, "mmio_writes=experimental-manual-only\n");
 		seq_puts(s, "mailbox_writes=experimental-manual-only\n");
