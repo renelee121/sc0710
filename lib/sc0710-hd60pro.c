@@ -219,26 +219,16 @@ sc0710_hd60pro_ack_bar5_irq(struct sc0710_dev *dev)
 }
 
 /*
- * Program the two BAR5 DWORDs written by the Windows MZ0380 bootstrap path.
+ * Validate that the Windows bootstrap BAR5 setup can be represented safely
+ * on this PCI assignment.
  *
- * FUN_14028d254 stores the physical start of Windows MEMORY #0 at ctx+0x80.
- * FUN_140278bb0 then writes:
- *
- *   BAR5+0x30 <- low32(ctx+0x80 + 0x04)
- *   BAR5+0x38 <- low32(ctx+0x80 + 0x5f)
- *
- * For the HD60 Pro, Windows MEMORY #0 is PCI BAR0 and MEMORY #1 is PCI
- * BAR5. Derive the values from the current PCI BAR0 assignment rather than
- * hard-coding an observed physical address.
- *
- * Windows performs DWORD writes, so fail closed if BAR0+0x5f cannot be
- * represented in 32 bits. Do not silently truncate a >4 GiB resource.
- *
- * Caller must hold state->mailbox_lock.
- * Definition only: no runtime path invokes this helper yet.
+ * This helper is read-only: it inspects PCI resource metadata and mappings
+ * only. Keep these checks in preflight so deterministic platform/resource
+ * incompatibilities cannot consume the bootstrap one-shot or follow any
+ * MMIO write.
  */
-static int __maybe_unused
-sc0710_hd60pro_program_bootstrap_bar5_locked(struct sc0710_dev *dev)
+static int
+sc0710_hd60pro_validate_bootstrap_bar5_setup(struct sc0710_dev *dev)
 {
 	resource_size_t bar0_phys;
 	resource_size_t bar0_size;
@@ -261,6 +251,40 @@ sc0710_hd60pro_program_bootstrap_bar5_locked(struct sc0710_dev *dev)
 	if (bar0_phys >
 	    0xffffffffULL - HD60PRO_BOOTSTRAP_BAR0_PHYS_PLUS5F)
 		return -ERANGE;
+
+	return 0;
+}
+
+/*
+ * Program the two BAR5 DWORDs written by the Windows MZ0380 bootstrap path.
+ *
+ * FUN_14028d254 stores the physical start of Windows MEMORY #0 at ctx+0x80.
+ * FUN_140278bb0 then writes:
+ *
+ *   BAR5+0x30 <- low32(ctx+0x80 + 0x04)
+ *   BAR5+0x38 <- low32(ctx+0x80 + 0x5f)
+ *
+ * For the HD60 Pro, Windows MEMORY #0 is PCI BAR0 and MEMORY #1 is PCI
+ * BAR5. Derive the values from the current PCI BAR0 assignment rather than
+ * hard-coding an observed physical address.
+ *
+ * Windows performs DWORD writes, so fail closed if BAR0+0x5f cannot be
+ * represented in 32 bits. Do not silently truncate a >4 GiB resource.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime path invokes this helper yet.
+ */
+static int __maybe_unused
+sc0710_hd60pro_program_bootstrap_bar5_locked(struct sc0710_dev *dev)
+{
+	resource_size_t bar0_phys;
+	int ret;
+
+	ret = sc0710_hd60pro_validate_bootstrap_bar5_setup(dev);
+	if (ret)
+		return ret;
+
+	bar0_phys = pci_resource_start(dev->pci, 0);
 
 	writel((u32)(bar0_phys + HD60PRO_BOOTSTRAP_BAR0_PHYS_PLUS4),
 	       (u8 __iomem *)dev->lmmio[1] +
@@ -935,6 +959,10 @@ sc0710_hd60pro_preflight_bootstrap_locked(
 
 	if (state->bootstrap.attempt_consumed)
 		return -EALREADY;
+
+	ret = sc0710_hd60pro_validate_bootstrap_bar5_setup(dev);
+	if (ret)
+		return ret;
 
 	/*
 	 * Do not expose partially-populated snapshot data as valid if any
