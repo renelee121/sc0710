@@ -217,6 +217,31 @@ sc0710_hd60pro_ack_bar5_irq(struct sc0710_dev *dev)
 	return 0;
 }
 
+/*
+ * Reconstructed Windows IRQ rearm sequence.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime path invokes this helper yet.
+ */
+static int __maybe_unused
+sc0710_hd60pro_rearm_irq_locked(struct sc0710_dev *dev)
+{
+	int ret;
+
+	ret = sc0710_hd60pro_ack_bar5_irq(dev);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_clear_irq_status(dev);
+	if (ret)
+		return ret;
+
+	return sc0710_hd60pro_write_bar0(
+		dev,
+		HD60PRO_BAR0_MAILBOX_TRIGGER,
+		HD60PRO_IRQ_ACK_TRIGGER_VALUE);
+}
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
