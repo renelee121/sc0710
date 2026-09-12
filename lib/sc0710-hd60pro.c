@@ -18,6 +18,7 @@
 #define HD60PRO_MAILBOX_POLL_COUNT		50U
 #define HD60PRO_MAILBOX_POLL_MIN_US		1000U
 #define HD60PRO_MAILBOX_POLL_MAX_US		1500U
+#define HD60PRO_BOOTSTRAP_SETTLE_MS		256U
 #define HD60PRO_I2C_EXPERIMENT_REG_04             0x04U
 #define HD60PRO_I2C_EXPERIMENT_REG_11             0x11U
 #define HD60PRO_I2C_EXPERIMENT_REG_19             0x19U
@@ -1083,6 +1084,14 @@ sc0710_hd60pro_bootstrap_once_locked(
 	struct sc0710_hd60pro_mailbox_result result;
 	int post_ret;
 	int ret;
+
+	/*
+	 * FUN_140278bb0 begins with sleep_ms(0x100) before its PRE rearm.
+	 * Preserve that 256 ms settling interval before Linux takes its
+	 * read-only preflight snapshot. The one-shot remains unconsumed
+	 * throughout the delay.
+	 */
+	msleep(HD60PRO_BOOTSTRAP_SETTLE_MS);
 
 	ret = sc0710_hd60pro_preflight_bootstrap_locked(dev, state);
 	if (ret)
