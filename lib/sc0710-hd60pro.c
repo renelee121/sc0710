@@ -302,6 +302,85 @@ sc0710_hd60pro_take_mailbox_snapshot(
 }
 
 /*
+ * Wait for completion of the exact Windows MZ0380 bootstrap request.
+ *
+ * Caller must hold state->mailbox_lock and must already have issued
+ * sc0710_hd60pro_bootstrap_request_locked().
+ *
+ * This helper is deliberately read-only. It must not clear mailbox status,
+ * ACK/rearm IRQ state, retry the request, reset hardware or modify PCI state.
+ *
+ * Linux currently uses bounded polling of BAR0 mailbox status bit 0 as the
+ * bootstrap completion observation. IRQ mailbox-complete remains diagnostic
+ * only at this stage.
+ */
+static int __maybe_unused
+sc0710_hd60pro_wait_bootstrap_completion_locked(
+	struct sc0710_dev *dev,
+	struct sc0710_hd60pro_mailbox_result *result)
+{
+	u64 started_ns;
+	u32 status = 0;
+	unsigned int i;
+	int ret;
+	int snapshot_ret;
+
+	if (!result)
+		return -EINVAL;
+
+	memset(result, 0, sizeof(*result));
+
+	if (!dev || !dev->pci || !dev->lmmio[0])
+		return -ENODEV;
+
+	started_ns = ktime_get_ns();
+
+	for (i = 0; i < HD60PRO_MAILBOX_POLL_COUNT; i++) {
+		ret = sc0710_hd60pro_read_bar0(
+			dev, HD60PRO_BAR0_MAILBOX_STATUS, &status);
+		if (ret)
+			goto out;
+
+		result->polls = i + 1;
+		result->last_poll_status = status;
+
+		if (status & HD60PRO_MAILBOX_STATUS_COMPLETE) {
+			result->completed = true;
+			ret = 0;
+			goto out;
+		}
+
+		usleep_range(HD60PRO_MAILBOX_POLL_MIN_US,
+			     HD60PRO_MAILBOX_POLL_MAX_US);
+	}
+
+	ret = -ETIMEDOUT;
+
+out:
+	result->elapsed_ns = ktime_get_ns() - started_ns;
+
+	/*
+	 * Diagnostic-only snapshot. Do not clear status, ACK IRQ state,
+	 * retry, reset, or repair PCI configuration here.
+	 */
+	snapshot_ret =
+		sc0710_hd60pro_take_mailbox_snapshot(dev, &result->after);
+
+	/*
+	 * The after-snapshot is diagnostic only. Failure to collect it must not
+	 * alter the primary polling outcome.
+	 */
+	if (!snapshot_ret) {
+		result->late_completion =
+			!result->completed &&
+			!!(result->after.mailbox_status &
+			   HD60PRO_MAILBOX_STATUS_COMPLETE);
+	}
+
+	return ret;
+}
+
+/*
  * Serialise every debugfs path that touches PCI configuration or MMIO with
  * the experimental mailbox operations. The debugfs core protects the file
  * operation's private data lifetime; this lock additionally guarantees that
