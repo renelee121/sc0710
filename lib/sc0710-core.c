@@ -1351,6 +1351,13 @@ static void sc0710_finidev(struct pci_dev *pci_dev)
 
 	pci_disable_device(pci_dev);
 
+	/*
+	 * Non-XDMA backends preserve the PCI decode state captured before
+	 * pci_enable_device(). Never restore bus mastering.
+	 */
+	if (!dev->hw_ops->uses_legacy_xdma_pipeline)
+		sc0710_restore_pci_decode_state(dev);
+
 	sc0710_dev_unregister(dev);
 
 	/* Free frame staging buffers if allocated */
