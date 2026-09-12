@@ -983,6 +983,78 @@ sc0710_hd60pro_preflight_bootstrap_locked(
 		&state->bootstrap.before);
 }
 
+/*
+ * Compose one complete Linux-side HD60 Pro bootstrap attempt.
+ *
+ * Caller must hold state->mailbox_lock.
+ *
+ * The preflight remains read-only and occurs before the one-shot is consumed.
+ * Once begin_bootstrap_locked() succeeds there is no rollback to IDLE.
+ *
+ * Linux deliberately performs one bootstrap request only. The Windows driver
+ * retries the request inside a bounded loop, but the current Linux policy is
+ * fail-stop: one committed hardware attempt per driver lifetime.
+ *
+ * Once the PRE rearm completes, always attempt the matching POST rearm before
+ * finishing the software state, even when BAR5 programming, request issue or
+ * completion polling fails. If PRE rearm itself fails, do not invent a second
+ * rearm as recovery for a partially-completed sequence.
+ *
+ * Completion diagnostics are recorded before POST rearm so timeout/error
+ * evidence cannot be destroyed by the cleanup/rearm writes.
+ *
+ * Definition only: no runtime path invokes this helper yet.
+ */
+static int __maybe_unused
+sc0710_hd60pro_bootstrap_once_locked(
+	struct sc0710_dev *dev,
+	struct sc0710_hd60pro_state *state)
+{
+	struct sc0710_hd60pro_mailbox_result result;
+	int post_ret;
+	int ret;
+
+	ret = sc0710_hd60pro_preflight_bootstrap_locked(dev, state);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_begin_bootstrap_locked(state);
+	if (ret)
+		return ret;
+
+	/*
+	 * PRE rearm is the first hardware operation after consuming the
+	 * one-shot. Failure here commits the attempt to FAILED, but we do not
+	 * synthesize a second rearm for an incompletely-executed PRE sequence.
+	 */
+	ret = sc0710_hd60pro_rearm_irq_locked(dev);
+	if (ret)
+		goto finish;
+
+	ret = sc0710_hd60pro_program_bootstrap_bar5_locked(dev);
+	if (ret)
+		goto post_rearm;
+
+	ret = sc0710_hd60pro_bootstrap_request_locked(dev);
+	if (ret)
+		goto post_rearm;
+
+	ret = sc0710_hd60pro_wait_bootstrap_completion_locked(dev, &result);
+	sc0710_hd60pro_record_bootstrap_result_locked(state, &result);
+
+post_rearm:
+	/*
+	 * Preserve the primary bootstrap error. A POST-rearm failure becomes
+	 * the result only when every earlier stage succeeded.
+	 */
+	post_ret = sc0710_hd60pro_rearm_irq_locked(dev);
+	if (!ret && post_ret)
+		ret = post_ret;
+
+finish:
+	return sc0710_hd60pro_finish_bootstrap_locked(state, ret);
+}
+
 static int
 sc0710_hd60pro_validate_manual_context_locked(
 	struct sc0710_dev *dev,
