@@ -556,7 +556,18 @@ struct sc0710_hd60pro_bootstrap_state {
 	bool attempt_consumed;
 	bool in_progress;
 	bool completed;
+
+	bool mailbox_completed;
+	bool late_completion;
+
 	int last_error;
+
+	u32 polls;
+	u32 last_poll_status;
+	u64 elapsed_ns;
+
+	struct sc0710_hd60pro_mailbox_snapshot before;
+	struct sc0710_hd60pro_mailbox_snapshot after;
 };
 
 struct sc0710_hd60pro_state {

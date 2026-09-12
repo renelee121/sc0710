@@ -666,10 +666,7 @@ sc0710_hd60pro_reset_control_state(struct sc0710_hd60pro_state *state)
 static void
 sc0710_hd60pro_reset_bootstrap_state(struct sc0710_hd60pro_state *state)
 {
-	state->bootstrap.attempt_consumed = false;
-	state->bootstrap.in_progress = false;
-	state->bootstrap.completed = false;
-	state->bootstrap.last_error = 0;
+	memset(&state->bootstrap, 0, sizeof(state->bootstrap));
 }
 
 /*
