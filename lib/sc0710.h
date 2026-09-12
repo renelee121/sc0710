@@ -560,6 +560,9 @@ struct sc0710_hd60pro_bootstrap_state {
 	bool mailbox_completed;
 	bool late_completion;
 
+	bool before_valid;
+	bool after_valid;
+
 	int last_error;
 
 	u32 polls;

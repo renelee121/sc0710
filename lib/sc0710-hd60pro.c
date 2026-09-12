@@ -54,6 +54,7 @@ struct sc0710_hd60pro_mailbox_request {
 struct sc0710_hd60pro_mailbox_result {
         bool completed;
         bool late_completion;
+        bool after_valid;
 
         u32 response;
 
@@ -371,6 +372,7 @@ out:
 	 * alter the primary polling outcome.
 	 */
 	if (!snapshot_ret) {
+		result->after_valid = true;
 		result->late_completion =
 			!result->completed &&
 			!!(result->after.mailbox_status &
@@ -667,6 +669,29 @@ static void
 sc0710_hd60pro_reset_bootstrap_state(struct sc0710_hd60pro_state *state)
 {
 	memset(&state->bootstrap, 0, sizeof(state->bootstrap));
+}
+
+/*
+ * Copy the hardware-observation result into bootstrap diagnostics.
+ *
+ * Caller must hold state->mailbox_lock. This helper is software-only:
+ * no MMIO, PCI access or control-plane transition is performed here.
+ */
+static void __maybe_unused
+sc0710_hd60pro_record_bootstrap_result_locked(
+	struct sc0710_hd60pro_state *state,
+	const struct sc0710_hd60pro_mailbox_result *result)
+{
+	if (!state || !result)
+		return;
+
+	state->bootstrap.mailbox_completed = result->completed;
+	state->bootstrap.late_completion = result->late_completion;
+	state->bootstrap.after_valid = result->after_valid;
+	state->bootstrap.polls = result->polls;
+	state->bootstrap.last_poll_status = result->last_poll_status;
+	state->bootstrap.elapsed_ns = result->elapsed_ns;
+	state->bootstrap.after = result->after;
 }
 
 /*
@@ -1025,6 +1050,7 @@ out:
 		if (!ret)
 			ret = snapshot_ret;
 	} else {
+		result->after_valid = true;
 		result->late_completion =
 			!result->completed &&
 			!!(result->after.mailbox_status &
@@ -1658,6 +1684,49 @@ static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 				   dev->hd60pro_state.control.phase));
 	seq_printf(s, "control_last_error=%d\n",
 			   dev->hd60pro_state.control.last_error);
+
+	seq_printf(s, "bootstrap_attempt_consumed=%u\n",
+		   dev->hd60pro_state.bootstrap.attempt_consumed);
+	seq_printf(s, "bootstrap_in_progress=%u\n",
+		   dev->hd60pro_state.bootstrap.in_progress);
+	seq_printf(s, "bootstrap_completed=%u\n",
+		   dev->hd60pro_state.bootstrap.completed);
+	seq_printf(s, "bootstrap_mailbox_completed=%u\n",
+		   dev->hd60pro_state.bootstrap.mailbox_completed);
+	seq_printf(s, "bootstrap_late_completion=%u\n",
+		   dev->hd60pro_state.bootstrap.late_completion);
+	seq_printf(s, "bootstrap_last_error=%d\n",
+		   dev->hd60pro_state.bootstrap.last_error);
+
+	seq_printf(s, "bootstrap_before_valid=%u\n",
+		   dev->hd60pro_state.bootstrap.before_valid);
+	seq_printf(s, "bootstrap_before_pci_command=0x%04x\n",
+		   dev->hd60pro_state.bootstrap.before.pci_command);
+	seq_printf(s, "bootstrap_before_mailbox_status=0x%08x\n",
+		   dev->hd60pro_state.bootstrap.before.mailbox_status);
+	seq_printf(s, "bootstrap_before_irq_status=0x%08x\n",
+		   dev->hd60pro_state.bootstrap.before.irq_status);
+	seq_printf(s, "bootstrap_before_irq_tag=0x%08x\n",
+		   dev->hd60pro_state.bootstrap.before.irq_tag);
+
+	seq_printf(s, "bootstrap_polls=%u\n",
+		   dev->hd60pro_state.bootstrap.polls);
+	seq_printf(s, "bootstrap_last_poll_status=0x%08x\n",
+		   dev->hd60pro_state.bootstrap.last_poll_status);
+	seq_printf(s, "bootstrap_elapsed_us=%llu\n",
+		   (unsigned long long)
+		   (dev->hd60pro_state.bootstrap.elapsed_ns / 1000));
+
+	seq_printf(s, "bootstrap_after_valid=%u\n",
+		   dev->hd60pro_state.bootstrap.after_valid);
+	seq_printf(s, "bootstrap_after_pci_command=0x%04x\n",
+		   dev->hd60pro_state.bootstrap.after.pci_command);
+	seq_printf(s, "bootstrap_after_mailbox_status=0x%08x\n",
+		   dev->hd60pro_state.bootstrap.after.mailbox_status);
+	seq_printf(s, "bootstrap_after_irq_status=0x%08x\n",
+		   dev->hd60pro_state.bootstrap.after.irq_status);
+	seq_printf(s, "bootstrap_after_irq_tag=0x%08x\n",
+		   dev->hd60pro_state.bootstrap.after.irq_tag);
 
 	if (READ_ONCE(hd60pro_experimental_mailbox)) {
 		seq_puts(s, "mode=observational-with-manual-mailbox-opt-in\n");
