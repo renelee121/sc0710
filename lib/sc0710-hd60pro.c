@@ -36,7 +36,7 @@ static bool hd60pro_active_control;
 module_param_named(hd60pro_active_control,
 		   hd60pro_active_control, bool, 0400);
 MODULE_PARM_DESC(hd60pro_active_control,
-		 "Request future HD60 Pro active control-plane mode; inert in G4-B3.7");
+		 "Enable one-shot HD60 Pro bootstrap control; DMA and IRQ remain disabled");
 
 
 struct sc0710_hd60pro_reg {
@@ -177,7 +177,7 @@ sc0710_hd60pro_write_bar0(struct sc0710_dev *dev, u32 offset, u32 value)
 /*
  * Specialized Windows rearm primitives.
  *
- * Definition only: these helpers deliberately have no runtime caller yet.
+ * Reachable only through the guarded bootstrap rearm sequence.
  * Keep them narrower than the generic mailbox writer so the reconstructed
  * IRQ rearm sequence cannot grow into an unrestricted MMIO write surface.
  */
@@ -273,7 +273,7 @@ sc0710_hd60pro_validate_bootstrap_bar5_setup(struct sc0710_dev *dev)
  * represented in 32 bits. Do not silently truncate a >4 GiB resource.
  *
  * Caller must hold state->mailbox_lock.
- * Definition only: no runtime path invokes this helper yet.
+ * Invoked only as part of the guarded one-shot bootstrap sequence.
  */
 static int __maybe_unused
 sc0710_hd60pro_program_bootstrap_bar5_locked(struct sc0710_dev *dev)
@@ -302,7 +302,7 @@ sc0710_hd60pro_program_bootstrap_bar5_locked(struct sc0710_dev *dev)
  * Reconstructed Windows IRQ rearm sequence.
  *
  * Caller must hold state->mailbox_lock.
- * Definition only: no runtime path invokes this helper yet.
+ * Invoked only by the PRE/POST stages of the guarded bootstrap sequence.
  */
 static int __maybe_unused
 sc0710_hd60pro_rearm_irq_locked(struct sc0710_dev *dev)
@@ -330,7 +330,7 @@ sc0710_hd60pro_rearm_irq_locked(struct sc0710_dev *dev)
  * trigger to BAR0+0x00. There is no BAR0+0x08 or BAR0+0x0c payload.
  *
  * Caller must hold state->mailbox_lock.
- * Definition only: no runtime path invokes this helper yet.
+ * Invoked only after guarded bootstrap admission and PRE rearm.
  */
 static int __maybe_unused
 sc0710_hd60pro_bootstrap_request_locked(struct sc0710_dev *dev)
@@ -1074,7 +1074,7 @@ sc0710_hd60pro_log_bootstrap_result_locked(
  * Completion diagnostics are recorded before POST rearm so timeout/error
  * evidence cannot be destroyed by the cleanup/rearm writes.
  *
- * Definition only: no runtime path invokes this helper yet.
+ * Runtime entry is restricted to the explicit active-control bring-up path.
  */
 static int __maybe_unused
 sc0710_hd60pro_bootstrap_once_locked(
@@ -1095,11 +1095,11 @@ sc0710_hd60pro_bootstrap_once_locked(
 
 	ret = sc0710_hd60pro_preflight_bootstrap_locked(dev, state);
 	if (ret)
-		goto log_result;
+		goto out;
 
 	ret = sc0710_hd60pro_begin_bootstrap_locked(state);
 	if (ret)
-		goto log_result;
+		goto out;
 
 	/*
 	 * PRE rearm is the first hardware operation after consuming the
@@ -1133,9 +1133,7 @@ post_rearm:
 finish:
 	ret = sc0710_hd60pro_finish_bootstrap_locked(state, ret);
 
-log_result:
-	sc0710_hd60pro_log_bootstrap_result_locked(dev, state, ret);
-
+out:
 	return ret;
 }
 
@@ -2048,9 +2046,9 @@ static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 
 	if (!dev->observational_only) {
 		seq_puts(s, "mode=active-control\n");
-		seq_puts(s, "active_bringup=unsupported\n");
-		seq_puts(s, "mmio_writes=disabled\n");
-		seq_puts(s, "mailbox_writes=disabled\n");
+		seq_puts(s, "active_bringup=bootstrap-one-shot\n");
+		seq_puts(s, "mmio_writes=bootstrap-only\n");
+		seq_puts(s, "mailbox_writes=bootstrap-only\n");
 		seq_puts(s, "i2c_reads=disabled\n");
 	} else if (READ_ONCE(hd60pro_experimental_mailbox)) {
 		seq_puts(s, "mode=observational-with-manual-mailbox-opt-in\n");
@@ -2236,7 +2234,7 @@ void sc0710_hd60pro_remove(struct sc0710_dev *dev)
 }
 
 static int
-sc0710_hd60pro_active_bringup_unsupported(struct sc0710_dev *dev)
+sc0710_hd60pro_active_bringup_bootstrap(struct sc0710_dev *dev)
 {
 	struct sc0710_hd60pro_state *state;
 	int ret;
@@ -2247,23 +2245,27 @@ sc0710_hd60pro_active_bringup_unsupported(struct sc0710_dev *dev)
 	state = &dev->hd60pro_state;
 
 	/*
-	 * B3.10 admits the active path only through the dedicated context
-	 * firewall. No control transition or frontend operation is authorized.
+	 * This is the only runtime admission point for the one-shot bootstrap.
+	 * The orchestrator owns the settling delay, read-only preflight,
+	 * one-shot consumption, state transitions, exact Windows-derived MMIO
+	 * sequence and bounded completion polling. Persistent diagnostics are
+	 * emitted below only after PCI bus mastering has been forced off.
+	 *
+	 * PCI bus mastering, Linux IRQ installation, DMA, frontend control and
+	 * capture remain disabled.
 	 */
 	mutex_lock(&state->mailbox_lock);
-	ret = sc0710_hd60pro_validate_active_context_locked(dev, state);
+	ret = sc0710_hd60pro_bootstrap_once_locked(dev, state);
 
 	/*
-	 * Preserve the existing fail-closed BME invariant on every return path.
-	 * The validator itself remains a pure admission check.
+	 * Preserve the fail-closed bus-master invariant on every exit,
+	 * including admission failure and committed bootstrap failure.
 	 */
 	pci_clear_master(dev->pci);
+	sc0710_hd60pro_log_bootstrap_result_locked(dev, state, ret);
 	mutex_unlock(&state->mailbox_lock);
 
-	if (ret)
-		return ret;
-
-	return -EOPNOTSUPP;
+	return ret;
 }
 
 static int
@@ -2307,7 +2309,7 @@ const struct sc0710_hw_ops sc0710_hd60pro_ops = {
         .exposes_passive_video     = true,
 	.init			= sc0710_hd60pro_probe,
 	.fini			= sc0710_hd60pro_remove,
-	.active_bringup		= sc0710_hd60pro_active_bringup_unsupported,
+	.active_bringup		= sc0710_hd60pro_active_bringup_bootstrap,
 	.capture_prepare	= sc0710_hd60pro_capture_unsupported,
 	.capture_start		= sc0710_hd60pro_capture_unsupported,
 	.capture_stop		= sc0710_hd60pro_capture_stop,
