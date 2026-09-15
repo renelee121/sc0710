@@ -573,10 +573,28 @@ struct sc0710_hd60pro_bootstrap_state {
 	struct sc0710_hd60pro_mailbox_snapshot after;
 };
 
+/*
+ * Linux-side semantic bookkeeping for the MZ0380 firmware-version gate.
+ *
+ * This state contains diagnostics only. Its existence does not authorize
+ * opcode 0x0a execution, firmware download, DMA, Bus Mastering or START.
+ */
+struct sc0710_hd60pro_firmware_version_state {
+	bool attempted;
+	bool in_progress;
+	bool completed;
+
+	u32 actual_major;
+	u32 actual_minor;
+
+	int last_error;
+};
+
 struct sc0710_hd60pro_state {
 	struct mutex mailbox_lock;
 	struct sc0710_hd60pro_control_state control;
 	struct sc0710_hd60pro_bootstrap_state bootstrap;
+	struct sc0710_hd60pro_firmware_version_state firmware_version;
 	bool attempt_consumed;
 	bool in_progress;
 	struct sc0710_hd60pro_signal_result signal;

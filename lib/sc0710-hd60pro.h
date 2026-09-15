@@ -41,6 +41,7 @@ enum hd60pro_mailbox_opcode {
 	 * Definition only: Linux execution remains unauthorized.
 	 */
 	HD60PRO_CMD_BOOTSTRAP		= 0x01,
+	HD60PRO_CMD_FIRMWARE_VERSION	= 0x0a,
 	HD60PRO_CMD_SIGNAL_READ		= 0x14,
 	HD60PRO_CMD_SIGNAL_WRITE	= 0x15,
 	HD60PRO_CMD_SIGNAL_CONFIG	= 0x17,

@@ -19,6 +19,12 @@
 #define HD60PRO_MAILBOX_POLL_MIN_US		1000U
 #define HD60PRO_MAILBOX_POLL_MAX_US		1500U
 #define HD60PRO_BOOTSTRAP_SETTLE_MS		256U
+
+#define HD60PRO_FW_VERSION_IRQ_TIMEOUT_MS	5000U
+#define HD60PRO_FW_VERSION_SETTLE_MS		100U
+#define HD60PRO_FW_VERSION_STATUS_MAGIC		0xAAAAAAAAU
+#define HD60PRO_FW_VERSION_EXPECTED_MAJOR	1U
+#define HD60PRO_FW_VERSION_EXPECTED_MINOR	11U
 #define HD60PRO_I2C_EXPERIMENT_REG_04             0x04U
 #define HD60PRO_I2C_EXPERIMENT_REG_11             0x11U
 #define HD60PRO_I2C_EXPERIMENT_REG_19             0x19U
@@ -36,7 +42,7 @@ static bool hd60pro_active_control;
 module_param_named(hd60pro_active_control,
 		   hd60pro_active_control, bool, 0400);
 MODULE_PARM_DESC(hd60pro_active_control,
-		 "Enable one-shot HD60 Pro bootstrap control; DMA and IRQ remain disabled");
+		 "Enable one-shot HD60 Pro P1 bootstrap/version control; DMA and IRQ remain disabled");
 
 
 struct sc0710_hd60pro_reg {
@@ -177,7 +183,7 @@ sc0710_hd60pro_write_bar0(struct sc0710_dev *dev, u32 offset, u32 value)
 /*
  * Specialized Windows rearm primitives.
  *
- * Reachable only through the guarded bootstrap rearm sequence.
+ * Reachable only through the guarded P1 rearm paths.
  * Keep them narrower than the generic mailbox writer so the reconstructed
  * IRQ rearm sequence cannot grow into an unrestricted MMIO write surface.
  */
@@ -302,7 +308,8 @@ sc0710_hd60pro_program_bootstrap_bar5_locked(struct sc0710_dev *dev)
  * Reconstructed Windows IRQ rearm sequence.
  *
  * Caller must hold state->mailbox_lock.
- * Invoked only by the PRE/POST stages of the guarded bootstrap sequence.
+ * Invoked by guarded bootstrap PRE/POST rearm and by the firmware-version
+ * completion path after a real mailbox-complete indication.
  */
 static int __maybe_unused
 sc0710_hd60pro_rearm_irq_locked(struct sc0710_dev *dev)
@@ -348,6 +355,294 @@ sc0710_hd60pro_bootstrap_request_locked(struct sc0710_dev *dev)
 		dev,
 		HD60PRO_BAR0_MAILBOX_TRIGGER,
 		HD60PRO_MAILBOX_TRIGGER_VALUE);
+}
+
+
+/*
+ * Reconstructed Windows MZ0380 firmware-version request.
+ *
+ * Exact request footprint:
+ *
+ *   BAR0+0x04 <- 0x0000000a
+ *   BAR0+0x08 <- 0x00000000
+ *   BAR0+0x0c <- 0x00000000
+ *   BAR0+0x00 <- 0x00000800
+ *
+ * This primitive deliberately does not clear BAR0+0x2c, wait for
+ * completion, ACK/rearm interrupt state, retry the request, update
+ * firmware, or modify PCI bus-master state.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Runtime use is restricted to the complete P1 one-shot path.
+ */
+static int __maybe_unused
+sc0710_hd60pro_firmware_version_request_locked(struct sc0710_dev *dev)
+{
+	int ret;
+
+	ret = sc0710_hd60pro_write_bar0(
+		dev,
+		HD60PRO_BAR0_MAILBOX_OPCODE,
+		HD60PRO_CMD_FIRMWARE_VERSION);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_write_bar0(
+		dev,
+		HD60PRO_BAR0_MAILBOX_WORD2,
+		0);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_write_bar0(
+		dev,
+		HD60PRO_BAR0_MAILBOX_RESPONSE0,
+		0);
+	if (ret)
+		return ret;
+
+	return sc0710_hd60pro_write_bar0(
+		dev,
+		HD60PRO_BAR0_MAILBOX_TRIGGER,
+		HD60PRO_MAILBOX_TRIGGER_VALUE);
+}
+
+
+/*
+ * Wait for the physical mailbox-complete indication used by the Windows
+ * semaphore path for MZ0380_SendCommand(..., mode=1, ...).
+ *
+ * Windows waits on ctx+0x69d0. That semaphore is released by the DPC after
+ * observing BAR0+0x30 bit 11. Linux does not have the HD60 Pro IRQ path yet,
+ * so this helper observes the same physical completion source using
+ * bounded read-only polling.
+ *
+ * This helper deliberately does not ACK/rearm the interrupt, inspect
+ * BAR0+0x2c, retry the command, or modify PCI state.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Runtime use is restricted to the complete P1 one-shot path.
+ */
+static int __maybe_unused
+sc0710_hd60pro_wait_firmware_version_irq_locked(struct sc0710_dev *dev)
+{
+	u64 deadline_ns;
+	u32 irq_status;
+	int ret;
+
+	if (!dev || !dev->pci || !dev->lmmio[0])
+		return -ENODEV;
+
+	deadline_ns = ktime_get_ns() +
+		(u64)HD60PRO_FW_VERSION_IRQ_TIMEOUT_MS * NSEC_PER_MSEC;
+
+	do {
+		ret = sc0710_hd60pro_read_bar0(
+			dev,
+			HD60PRO_BAR0_IRQ_STATUS,
+			&irq_status);
+		if (ret)
+			return ret;
+
+		if (irq_status & HD60PRO_IRQ_STATUS_MAILBOX_COMPLETE)
+			return 0;
+
+		usleep_range(HD60PRO_MAILBOX_POLL_MIN_US,
+			     HD60PRO_MAILBOX_POLL_MAX_US);
+	} while (ktime_get_ns() < deadline_ns);
+
+	return -ETIMEDOUT;
+}
+
+/*
+ * Validate and collect the MZ0380 firmware-version response after mailbox
+ * completion has already been observed and the IRQ state has been rearmed
+ * by the P1 orchestrator.
+ *
+ * Windows requires BAR0+0x2c == 0xAAAAAAAA, waits 100 ms, then reads the
+ * two version DWORDs from BAR0+0x08 and BAR0+0x0c.
+ *
+ * No retries, ACK/rearm, firmware update, DMA, START, or PCI Bus Mastering
+ * are performed here.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Runtime use is restricted to the complete P1 one-shot path.
+ */
+static int __maybe_unused
+sc0710_hd60pro_read_firmware_version_locked(
+	struct sc0710_dev *dev,
+	u32 *version_major,
+	u32 *version_minor)
+{
+	u32 status;
+	int ret;
+
+	if (!dev || !dev->pci || !dev->lmmio[0])
+		return -ENODEV;
+
+	if (!version_major || !version_minor)
+		return -EINVAL;
+
+	ret = sc0710_hd60pro_read_bar0(
+		dev,
+		HD60PRO_BAR0_MAILBOX_STATUS,
+		&status);
+	if (ret)
+		return ret;
+
+	if (status != HD60PRO_FW_VERSION_STATUS_MAGIC)
+		return -EIO;
+
+	msleep(HD60PRO_FW_VERSION_SETTLE_MS);
+
+	ret = sc0710_hd60pro_read_bar0(
+		dev,
+		HD60PRO_BAR0_MAILBOX_WORD2,
+		version_major);
+	if (ret)
+		return ret;
+
+	return sc0710_hd60pro_read_bar0(
+		dev,
+		HD60PRO_BAR0_MAILBOX_RESPONSE0,
+		version_minor);
+}
+
+
+/*
+ * P1 firmware-version compatibility gate for the MZ0380.
+ *
+ * Expected version provenance:
+ *
+ *   MZ0380.FW.TXT from the Windows package containing the matching
+ *   e60MZ0380.X64.SYS:
+ *
+ *       "01.11\n"
+ *
+ * Linux intentionally fails closed on a version mismatch and never
+ * proceeds to the Windows firmware-download opcodes 0x0b/0x0c.
+ *
+ * Sequence:
+ *
+ *   - require PCI memory decode enabled and Bus Master disabled
+ *   - require a clean BAR0 IRQ-status baseline
+ *   - issue one opcode 0x0a request
+ *   - observe BAR0+0x30 bit 11, bounded to 5 seconds
+ *   - perform the reconstructed IRQ ACK/rearm
+ *   - require BAR0+0x2c == 0xAAAAAAAA
+ *   - wait 100 ms
+ *   - read BAR0+0x08 / BAR0+0x0c
+ *   - require version 1.11
+ *   - verify Bus Master remains disabled
+ *
+ * No retries, firmware writes, DMA, START, or pci_set_master().
+ *
+ * Caller must hold state->mailbox_lock.
+ * Runtime use is restricted to the complete P1 one-shot path.
+ */
+static int __maybe_unused
+sc0710_hd60pro_firmware_version_gate_locked(
+	struct sc0710_dev *dev,
+	u32 *actual_major,
+	u32 *actual_minor)
+{
+	u16 command;
+	u32 irq_status;
+	int pci_ret;
+	int rearm_ret;
+	int ret;
+
+	if (!dev || !dev->pci || !dev->lmmio[0] || !dev->lmmio[1])
+		return -ENODEV;
+
+	if (!actual_major || !actual_minor)
+		return -EINVAL;
+
+	*actual_major = 0;
+	*actual_minor = 0;
+
+	ret = sc0710_hd60pro_read_pci_command(dev->pci, &command);
+	if (ret)
+		return ret;
+
+	if (!(command & PCI_COMMAND_MEMORY))
+		return -EIO;
+
+	if (command & PCI_COMMAND_MASTER) {
+		pci_clear_master(dev->pci);
+		return -EIO;
+	}
+
+	/*
+	 * Do not consume a stale mailbox completion from the preceding
+	 * bootstrap. Admission here remains read-only.
+	 */
+	ret = sc0710_hd60pro_read_bar0(
+		dev,
+		HD60PRO_BAR0_IRQ_STATUS,
+		&irq_status);
+	if (ret)
+		goto out_verify_pci;
+
+	if (irq_status != 0) {
+		ret = -EBUSY;
+		goto out_verify_pci;
+	}
+
+	ret = sc0710_hd60pro_firmware_version_request_locked(dev);
+	if (ret)
+		goto out_verify_pci;
+
+	ret = sc0710_hd60pro_wait_firmware_version_irq_locked(dev);
+	if (ret)
+		goto out_verify_pci;
+
+	/*
+	 * Rearm only after mailbox completion has actually been observed.
+	 *
+	 * In the reconstructed Windows mode=1 path, the ISR performs this
+	 * sequence after a real interrupt and before the DPC releases the
+	 * semaphore. A timeout in the waiter does not synthesize an ISR.
+	 *
+	 * Linux therefore fails stop on timeout/read failure instead of
+	 * issuing BAR0/BAR5 cleanup writes against a command whose completion
+	 * was never observed.
+	 */
+	rearm_ret = sc0710_hd60pro_rearm_irq_locked(dev);
+	if (rearm_ret) {
+		ret = rearm_ret;
+		goto out_verify_pci;
+	}
+
+	ret = sc0710_hd60pro_read_firmware_version_locked(
+		dev,
+		actual_major,
+		actual_minor);
+	if (ret)
+		goto out_verify_pci;
+
+	if (*actual_major != HD60PRO_FW_VERSION_EXPECTED_MAJOR ||
+	    *actual_minor != HD60PRO_FW_VERSION_EXPECTED_MINOR)
+		ret = -EPROTO;
+
+out_verify_pci:
+	pci_ret = sc0710_hd60pro_read_pci_command(dev->pci, &command);
+	if (pci_ret) {
+		if (!ret)
+			ret = pci_ret;
+		return ret;
+	}
+
+	if (command & PCI_COMMAND_MASTER) {
+		pci_clear_master(dev->pci);
+		if (!ret)
+			ret = -EIO;
+	}
+
+	if (!(command & PCI_COMMAND_MEMORY) && !ret)
+		ret = -EIO;
+
+	return ret;
 }
 
 static int
@@ -751,6 +1046,14 @@ sc0710_hd60pro_reset_bootstrap_state(struct sc0710_hd60pro_state *state)
 	memset(&state->bootstrap, 0, sizeof(state->bootstrap));
 }
 
+static void
+sc0710_hd60pro_reset_firmware_version_state(
+	struct sc0710_hd60pro_state *state)
+{
+	memset(&state->firmware_version, 0,
+	       sizeof(state->firmware_version));
+}
+
 /*
  * Copy the hardware-observation result into bootstrap diagnostics.
  *
@@ -811,21 +1114,25 @@ sc0710_hd60pro_begin_bootstrap_locked(struct sc0710_hd60pro_state *state)
 }
 
 /*
- * Finish a Linux-side bootstrap attempt after the hardware outcome is known.
+ * Finish the bootstrap substage of Linux P1 after its hardware outcome is
+ * known.
  *
  * Caller must hold state->mailbox_lock. This helper changes only software
  * bookkeeping and control-plane state; it performs no PCI or MMIO access.
  *
- * A successful bootstrap advances BOOTSTRAP -> RESET. A real bootstrap
- * failure advances BOOTSTRAP -> FAILED and permanently consumes the attempt
- * for the current driver lifetime.
+ * Failure commits the global control plane:
+ *
+ *     BOOTSTRAP -> FAILED
+ *
+ * Success deliberately remains in BOOTSTRAP. It records only that opcode
+ * 0x01 completed successfully; the firmware-version gate must still pass
+ * before the P1 orchestrator may advance the global phase to RESET.
  */
 static int __maybe_unused
 sc0710_hd60pro_finish_bootstrap_locked(
 	struct sc0710_hd60pro_state *state,
 	int result)
 {
-	enum sc0710_hd60pro_control_phase next;
 	int ret;
 
 	if (!state)
@@ -841,15 +1148,117 @@ sc0710_hd60pro_finish_bootstrap_locked(
 	if (result > 0)
 		return -EINVAL;
 
-	next = result ? HD60PRO_CONTROL_FAILED : HD60PRO_CONTROL_RESET;
-
-	ret = sc0710_hd60pro_control_transition_locked(state, next, result);
-	if (ret)
-		return ret;
+	if (result) {
+		ret = sc0710_hd60pro_control_transition_locked(
+			state, HD60PRO_CONTROL_FAILED, result);
+		if (ret)
+			return ret;
+	}
 
 	state->bootstrap.completed = !result;
 	state->bootstrap.last_error = result;
 	state->bootstrap.in_progress = false;
+
+	return result;
+}
+
+
+/*
+ * Begin the firmware-version substage of P1.
+ *
+ * Software-only bookkeeping: no MMIO or PCI access is performed here.
+ *
+ * P1 integration keeps control.phase at BOOTSTRAP after the opcode-0x01
+ * substage succeeds. Only then may this helper be called.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Runtime use is restricted to the complete P1 one-shot path.
+ */
+static int __maybe_unused
+sc0710_hd60pro_begin_firmware_version_locked(
+	struct sc0710_hd60pro_state *state)
+{
+	if (!state)
+		return -EINVAL;
+
+	if (state->control.phase != HD60PRO_CONTROL_BOOTSTRAP)
+		return -EPERM;
+
+	if (!state->bootstrap.attempt_consumed ||
+	    state->bootstrap.in_progress ||
+	    !state->bootstrap.completed)
+		return -EPERM;
+
+	if (state->firmware_version.in_progress)
+		return -EBUSY;
+
+	if (state->firmware_version.attempted)
+		return -EALREADY;
+
+	state->firmware_version.attempted = true;
+	state->firmware_version.in_progress = true;
+	state->firmware_version.completed = false;
+	state->firmware_version.actual_major = 0;
+	state->firmware_version.actual_minor = 0;
+	state->firmware_version.last_error = 0;
+
+	return 0;
+}
+
+/*
+ * Finish the firmware-version substage and commit the global P1 outcome.
+ *
+ * Success:
+ *
+ *     BOOTSTRAP -> RESET
+ *
+ * Failure:
+ *
+ *     BOOTSTRAP -> FAILED
+ *
+ * This helper is software-only. The actual opcode-0x0a transaction remains
+ * isolated inside sc0710_hd60pro_firmware_version_gate_locked().
+ *
+ * Caller must hold state->mailbox_lock.
+ * Runtime use is restricted to the complete P1 one-shot path.
+ */
+static int __maybe_unused
+sc0710_hd60pro_finish_firmware_version_locked(
+	struct sc0710_hd60pro_state *state,
+	int result,
+	u32 actual_major,
+	u32 actual_minor)
+{
+	enum sc0710_hd60pro_control_phase next;
+	int ret;
+
+	if (!state)
+		return -EINVAL;
+
+	if (!state->firmware_version.attempted ||
+	    !state->firmware_version.in_progress)
+		return -EPERM;
+
+	if (state->control.phase != HD60PRO_CONTROL_BOOTSTRAP)
+		return -EPERM;
+
+	if (result > 0)
+		return -EINVAL;
+
+	next = result ?
+		HD60PRO_CONTROL_FAILED :
+		HD60PRO_CONTROL_RESET;
+
+	ret = sc0710_hd60pro_control_transition_locked(
+		state, next, result);
+	if (ret)
+		return ret;
+
+	state->firmware_version.actual_major = actual_major;
+	state->firmware_version.actual_minor = actual_minor;
+	state->firmware_version.completed = !result;
+	state->firmware_version.last_error = result;
+	state->firmware_version.in_progress = false;
 
 	return result;
 }
@@ -985,18 +1394,22 @@ sc0710_hd60pro_preflight_bootstrap_locked(
 }
 
 /*
- * Persist the final bootstrap state in the kernel log.
+ * Persist the final P1 state in the kernel log.
  *
  * A failed active probe tears debugfs down during unwind, so this record is
  * intentionally emitted while the backend state and BAR mappings are still
  * alive. Caller must hold state->mailbox_lock.
+ *
+ * The top-level result is the complete P1 result. Bootstrap and firmware
+ * version retain their own independent substage diagnostics below.
  */
 static void __maybe_unused
-sc0710_hd60pro_log_bootstrap_result_locked(
+sc0710_hd60pro_log_p1_result_locked(
 	struct sc0710_dev *dev,
 	struct sc0710_hd60pro_state *state,
 	int result)
 {
+	const struct sc0710_hd60pro_firmware_version_state *firmware_version;
 	const struct sc0710_hd60pro_bootstrap_state *bootstrap;
 	u16 command = 0;
 	int command_ret;
@@ -1005,26 +1418,31 @@ sc0710_hd60pro_log_bootstrap_result_locked(
 		return;
 
 	bootstrap = &state->bootstrap;
+	firmware_version = &state->firmware_version;
 	command_ret = sc0710_hd60pro_read_pci_command(dev->pci, &command);
 
-	pr_info("%s: HD60 Pro bootstrap result=%d phase=%s "
-		"control_error=%d attempt_consumed=%u in_progress=%u "
-		"completed=%u mailbox_completed=%u late_completion=%u "
-		"polls=%u last_poll_status=0x%08x elapsed_us=%llu\n",
+	pr_info("%s: HD60 Pro P1 result=%d phase=%s control_error=%d\n",
 		dev->name,
 		result,
 		sc0710_hd60pro_control_phase_name(state->control.phase),
-		state->control.last_error,
+		state->control.last_error);
+
+	pr_info("%s: HD60 Pro P1 bootstrap attempt_consumed=%u "
+		"in_progress=%u completed=%u last_error=%d "
+		"mailbox_completed=%u late_completion=%u polls=%u "
+		"last_poll_status=0x%08x elapsed_us=%llu\n",
+		dev->name,
 		bootstrap->attempt_consumed,
 		bootstrap->in_progress,
 		bootstrap->completed,
+		bootstrap->last_error,
 		bootstrap->mailbox_completed,
 		bootstrap->late_completion,
 		bootstrap->polls,
 		bootstrap->last_poll_status,
 		(unsigned long long)(bootstrap->elapsed_ns / 1000));
 
-	pr_info("%s: HD60 Pro bootstrap before_valid=%u "
+	pr_info("%s: HD60 Pro P1 bootstrap before_valid=%u "
 		"pci=0x%04x mailbox=0x%08x irq=0x%08x tag=0x%08x\n",
 		dev->name,
 		bootstrap->before_valid,
@@ -1033,7 +1451,7 @@ sc0710_hd60pro_log_bootstrap_result_locked(
 		bootstrap->before.irq_status,
 		bootstrap->before.irq_tag);
 
-	pr_info("%s: HD60 Pro bootstrap after_valid=%u "
+	pr_info("%s: HD60 Pro P1 bootstrap after_valid=%u "
 		"pci=0x%04x mailbox=0x%08x irq=0x%08x tag=0x%08x\n",
 		dev->name,
 		bootstrap->after_valid,
@@ -1042,15 +1460,28 @@ sc0710_hd60pro_log_bootstrap_result_locked(
 		bootstrap->after.irq_status,
 		bootstrap->after.irq_tag);
 
+	pr_info("%s: HD60 Pro P1 firmware_version expected=%u.%u "
+		"attempted=%u in_progress=%u completed=%u "
+		"actual=%u.%u last_error=%d\n",
+		dev->name,
+		HD60PRO_FW_VERSION_EXPECTED_MAJOR,
+		HD60PRO_FW_VERSION_EXPECTED_MINOR,
+		firmware_version->attempted,
+		firmware_version->in_progress,
+		firmware_version->completed,
+		firmware_version->actual_major,
+		firmware_version->actual_minor,
+		firmware_version->last_error);
+
 	if (!command_ret)
-		pr_info("%s: HD60 Pro bootstrap final_pci_command=0x%04x "
+		pr_info("%s: HD60 Pro P1 final_pci_command=0x%04x "
 			"memory_space=%u bus_master=%u\n",
 			dev->name,
 			command,
 			!!(command & PCI_COMMAND_MEMORY),
 			!!(command & PCI_COMMAND_MASTER));
 	else
-		pr_info("%s: HD60 Pro bootstrap final_pci_command_error=%d\n",
+		pr_info("%s: HD60 Pro P1 final_pci_command_error=%d\n",
 			dev->name, command_ret);
 }
 
@@ -1134,6 +1565,83 @@ finish:
 	ret = sc0710_hd60pro_finish_bootstrap_locked(state, ret);
 
 out:
+	return ret;
+}
+
+/*
+ * Execute the complete non-DMA P1 admission sequence.
+ *
+ * One driver-lifetime bootstrap attempt owns the whole sequence:
+ *
+ *   1. bootstrap opcode 0x01
+ *   2. firmware-version opcode 0x0a
+ *   3. strict compatibility gate against expected version 1.11
+ *
+ * Bootstrap success is only a substage result and deliberately leaves
+ * control.phase at BOOTSTRAP. The firmware-version finalizer is the only
+ * success path that advances BOOTSTRAP -> RESET.
+ *
+ * Any bootstrap failure or firmware-version failure permanently commits the
+ * control plane to FAILED. There is no retry, firmware download, DMA, START
+ * command or pci_set_master() operation in P1.
+ *
+ * Caller must hold state->mailbox_lock.
+ */
+static int __maybe_unused
+sc0710_hd60pro_p1_once_locked(
+	struct sc0710_dev *dev,
+	struct sc0710_hd60pro_state *state)
+{
+	u32 actual_major = 0;
+	u32 actual_minor = 0;
+	int transition_ret;
+	int ret;
+
+	ret = sc0710_hd60pro_bootstrap_once_locked(dev, state);
+	if (ret)
+		return ret;
+
+	/*
+	 * Bootstrap success closes only that substage. P1 itself remains in
+	 * BOOTSTRAP until the firmware-version gate succeeds.
+	 */
+	if (state->control.phase != HD60PRO_CONTROL_BOOTSTRAP ||
+	    !state->bootstrap.completed ||
+	    state->bootstrap.in_progress) {
+		ret = -EPROTO;
+		goto fail_control;
+	}
+
+	ret = sc0710_hd60pro_begin_firmware_version_locked(state);
+	if (ret)
+		goto fail_control;
+
+	ret = sc0710_hd60pro_firmware_version_gate_locked(
+		dev,
+		&actual_major,
+		&actual_minor);
+
+	return sc0710_hd60pro_finish_firmware_version_locked(
+		state,
+		ret,
+		actual_major,
+		actual_minor);
+
+fail_control:
+	/*
+	 * Bootstrap has succeeded but Linux could not coherently enter the
+	 * version substage. Permanently fail the control plane rather than
+	 * leaving a retryable/zombie BOOTSTRAP state.
+	 */
+	state->firmware_version.last_error = ret;
+
+	transition_ret = sc0710_hd60pro_control_transition_locked(
+		state,
+		HD60PRO_CONTROL_FAILED,
+		ret);
+	if (transition_ret)
+		return transition_ret;
+
 	return ret;
 }
 
@@ -2044,11 +2552,27 @@ static int sc0710_hd60pro_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "bootstrap_after_irq_tag=0x%08x\n",
 		   dev->hd60pro_state.bootstrap.after.irq_tag);
 
+
+	seq_printf(s, "firmware_version_expected=%u.%u\n",
+		   HD60PRO_FW_VERSION_EXPECTED_MAJOR,
+		   HD60PRO_FW_VERSION_EXPECTED_MINOR);
+	seq_printf(s, "firmware_version_attempted=%u\n",
+		   dev->hd60pro_state.firmware_version.attempted);
+	seq_printf(s, "firmware_version_in_progress=%u\n",
+		   dev->hd60pro_state.firmware_version.in_progress);
+	seq_printf(s, "firmware_version_completed=%u\n",
+		   dev->hd60pro_state.firmware_version.completed);
+	seq_printf(s, "firmware_version_actual=%u.%u\n",
+		   dev->hd60pro_state.firmware_version.actual_major,
+		   dev->hd60pro_state.firmware_version.actual_minor);
+	seq_printf(s, "firmware_version_last_error=%d\n",
+		   dev->hd60pro_state.firmware_version.last_error);
+
 	if (!dev->observational_only) {
 		seq_puts(s, "mode=active-control\n");
-		seq_puts(s, "active_bringup=bootstrap-one-shot\n");
-		seq_puts(s, "mmio_writes=bootstrap-only\n");
-		seq_puts(s, "mailbox_writes=bootstrap-only\n");
+		seq_puts(s, "active_bringup=p1-bootstrap-fw-version-one-shot\n");
+		seq_puts(s, "mmio_writes=bootstrap-and-fw-version-only\n");
+		seq_puts(s, "mailbox_writes=bootstrap-and-fw-version-only\n");
 		seq_puts(s, "i2c_reads=disabled\n");
 	} else if (READ_ONCE(hd60pro_experimental_mailbox)) {
 		seq_puts(s, "mode=observational-with-manual-mailbox-opt-in\n");
@@ -2119,6 +2643,7 @@ int sc0710_hd60pro_probe(struct sc0710_dev *dev)
 	mutex_init(&dev->hd60pro_state.mailbox_lock);
 	sc0710_hd60pro_reset_control_state(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_bootstrap_state(&dev->hd60pro_state);
+	sc0710_hd60pro_reset_firmware_version_state(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_experiment_result(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_clear_result(&dev->hd60pro_state);
 	sc0710_hd60pro_reset_i2c_result(&dev->hd60pro_state);
@@ -2234,7 +2759,7 @@ void sc0710_hd60pro_remove(struct sc0710_dev *dev)
 }
 
 static int
-sc0710_hd60pro_active_bringup_bootstrap(struct sc0710_dev *dev)
+sc0710_hd60pro_active_bringup_p1(struct sc0710_dev *dev)
 {
 	struct sc0710_hd60pro_state *state;
 	int ret;
@@ -2245,7 +2770,7 @@ sc0710_hd60pro_active_bringup_bootstrap(struct sc0710_dev *dev)
 	state = &dev->hd60pro_state;
 
 	/*
-	 * This is the only runtime admission point for the one-shot bootstrap.
+	 * This is the only runtime admission point for the one-shot P1 sequence.
 	 * The orchestrator owns the settling delay, read-only preflight,
 	 * one-shot consumption, state transitions, exact Windows-derived MMIO
 	 * sequence and bounded completion polling. Persistent diagnostics are
@@ -2255,14 +2780,14 @@ sc0710_hd60pro_active_bringup_bootstrap(struct sc0710_dev *dev)
 	 * capture remain disabled.
 	 */
 	mutex_lock(&state->mailbox_lock);
-	ret = sc0710_hd60pro_bootstrap_once_locked(dev, state);
+	ret = sc0710_hd60pro_p1_once_locked(dev, state);
 
 	/*
 	 * Preserve the fail-closed bus-master invariant on every exit,
-	 * including admission failure and committed bootstrap failure.
+	 * including admission failure and committed P1 failure.
 	 */
 	pci_clear_master(dev->pci);
-	sc0710_hd60pro_log_bootstrap_result_locked(dev, state, ret);
+	sc0710_hd60pro_log_p1_result_locked(dev, state, ret);
 	mutex_unlock(&state->mailbox_lock);
 
 	return ret;
@@ -2309,7 +2834,7 @@ const struct sc0710_hw_ops sc0710_hd60pro_ops = {
         .exposes_passive_video     = true,
 	.init			= sc0710_hd60pro_probe,
 	.fini			= sc0710_hd60pro_remove,
-	.active_bringup		= sc0710_hd60pro_active_bringup_bootstrap,
+	.active_bringup		= sc0710_hd60pro_active_bringup_p1,
 	.capture_prepare	= sc0710_hd60pro_capture_unsupported,
 	.capture_start		= sc0710_hd60pro_capture_unsupported,
 	.capture_stop		= sc0710_hd60pro_capture_stop,
