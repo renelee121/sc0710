@@ -668,6 +668,17 @@ out_verify_pci:
  *
  * P2.1A is definition-only: no runtime caller is added in this step.
  */
+
+/*
+ * P2.1B paged-register scope.
+ *
+ * The FA:1C HD60 Pro path uses target 0x9c with page selections
+ * 0x00, 0x01, 0x02 and 0x80.  Keep the Linux reconstruction closed
+ * over only that proven set for now.
+ */
+#define HD60PRO_FRONTEND_PAGED_TARGET       0x9cU
+#define HD60PRO_PAGED_PAGE_CACHE_INVALID    0xffU
+
 static int __maybe_unused
 sc0710_hd60pro_mode0_target_command_locked(
 	struct sc0710_dev *dev,
@@ -919,6 +930,172 @@ sc0710_hd60pro_extended_reg_write_u32_locked(
 		request,
 		ARRAY_SIZE(request),
 		NULL);
+}
+
+
+
+/*
+ * Return whether a page is part of the statically recovered FA:1C
+ * frontend path.
+ *
+ * This is intentionally not a general MZ0380 page whitelist.
+ */
+static bool __maybe_unused
+sc0710_hd60pro_paged_page_allowed(u8 page)
+{
+	switch (page) {
+	case 0x00:
+	case 0x01:
+	case 0x02:
+	case 0x80:
+		return true;
+	default:
+		return false;
+	}
+}
+
+
+/*
+ * Select one page of the target-0x9c frontend.
+ *
+ * Recovered Windows transport:
+ *
+ *   [800, 1b, 9c, 00, page]
+ *
+ * Windows stores the requested page in private+0x2090 before learning
+ * whether the selector command succeeded. Linux deliberately does not
+ * reproduce that cache-poisoning behavior: cached_page is changed only
+ * after the mailbox command succeeds.
+ *
+ * A caller starts a sequence with:
+ *
+ *   u8 cached_page = HD60PRO_PAGED_PAGE_CACHE_INVALID;
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: P2.1B adds no runtime caller.
+ */
+static int __maybe_unused
+sc0710_hd60pro_paged_select_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page,
+	u8 page)
+{
+	int ret;
+
+	if (!dev || !cached_page)
+		return -EINVAL;
+
+	if (!sc0710_hd60pro_paged_page_allowed(page))
+		return -EPERM;
+
+	if (*cached_page == page)
+		return 0;
+
+	/*
+	 * Once the selector command is issued, a transport error or timeout
+	 * leaves the physical page ambiguous: the device may have accepted
+	 * the write even though Linux did not observe completion.  Never
+	 * preserve stale certainty across that boundary.
+	 */
+	*cached_page = HD60PRO_PAGED_PAGE_CACHE_INVALID;
+
+	ret = sc0710_hd60pro_target_reg_write_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		0x00,
+		page);
+	if (ret)
+		return ret;
+
+	*cached_page = page;
+	return 0;
+}
+
+
+/*
+ * FUN_140277884 specialized to the target-0x9c FA:1C path.
+ *
+ * Select the requested page if needed, then issue:
+ *
+ *   [800, 1a, 9c, reg, 0]
+ *
+ * The successful response is the full DWORD from BAR0+0x10.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller in P2.1B.
+ */
+static int __maybe_unused
+sc0710_hd60pro_paged_reg_read_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page,
+	u8 page,
+	u8 reg,
+	u32 *value)
+{
+	int ret;
+
+	if (!value)
+		return -EINVAL;
+
+	ret = sc0710_hd60pro_paged_select_locked(
+		dev,
+		cached_page,
+		page);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target_reg_read_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		reg,
+		value);
+	if (ret && cached_page)
+		*cached_page = HD60PRO_PAGED_PAGE_CACHE_INVALID;
+
+	return ret;
+}
+
+
+/*
+ * FUN_14028658c specialized to the target-0x9c FA:1C path.
+ *
+ * Select the requested page if needed, then issue:
+ *
+ *   [800, 1b, 9c, reg, value]
+ *
+ * As in Windows, an ordinary write to register 0 does not itself rewrite
+ * the software page cache. The cache records the explicit selector command,
+ * not an inferred hardware state transition.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller in P2.1B.
+ */
+static int __maybe_unused
+sc0710_hd60pro_paged_reg_write_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page,
+	u8 page,
+	u8 reg,
+	u8 value)
+{
+	int ret;
+
+	ret = sc0710_hd60pro_paged_select_locked(
+		dev,
+		cached_page,
+		page);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target_reg_write_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		reg,
+		value);
+	if (ret && cached_page)
+		*cached_page = HD60PRO_PAGED_PAGE_CACHE_INVALID;
+
+	return ret;
 }
 
 
