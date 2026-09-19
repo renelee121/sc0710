@@ -1500,6 +1500,204 @@ sc0710_hd60pro_fa1c_rmw_tail[] __maybe_unused = {
 };
 
 
+
+/*
+ * P2.2C: values derived from the proven FA:1C first-initialization
+ * baseline.
+ *
+ * These helpers deliberately do not generalize Windows property/config
+ * behavior. They model only the baseline already recovered for:
+ *
+ *   PCI 12ab:0380
+ *   subsystem 1cfa:0006
+ *   property-absent/default first initialization
+ *
+ * They remain definition-only in P2.2C.
+ */
+
+
+/*
+ * Property baseline:
+ *
+ *   ctx+97d8 CustomCompanyAlconProperty = 0
+ *   ctx+81d8 CustomAnalogVideoInputEqProperty = 1
+ *
+ * Windows therefore programs:
+ *
+ *   page1:17 <- 00
+ *   page1:18 <- 00
+ *   page1:19 <- 00
+ *
+ * Caller must hold state->mailbox_lock.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_program_eq_baseline_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page)
+{
+	int ret;
+
+	ret = sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x01, 0x17, 0x00);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x01, 0x18, 0x00);
+	if (ret)
+		return ret;
+
+	return sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x01, 0x19, 0x00);
+}
+
+
+/*
+ * FA:1C first-init baseline around page1:24.
+ *
+ * FUN_14024ea94 is an ordering barrier immediately before this block and
+ * is intentionally NOT reproduced here; P2.2D will model that helper
+ * separately.
+ *
+ * Proven first-init software baseline:
+ *
+ *   ctx+6a34 = 0
+ *
+ * therefore:
+ *
+ *   page1:24 <- 40
+ *
+ * Windows then reads page1:24.  If physical readback bit 0 is set:
+ *
+ *   page1:25 <- 00
+ *   page1:26 <- 00
+ *   page1:27 <- 00   (five times)
+ *
+ * The conditional remains dependent on physical readback; Linux must not
+ * predict it from the value just written.
+ *
+ * Caller must hold state->mailbox_lock.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_program_page1_24_baseline_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page)
+{
+	u32 response;
+	unsigned int i;
+	int ret;
+
+	ret = sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x01, 0x24, 0x40);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_paged_reg_read_locked(
+		dev, cached_page, 0x01, 0x24, &response);
+	if (ret)
+		return ret;
+
+	if (!(response & BIT(0)))
+		return 0;
+
+	ret = sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x01, 0x25, 0x00);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x01, 0x26, 0x00);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < 5; i++) {
+		ret = sc0710_hd60pro_paged_reg_write_locked(
+			dev, cached_page, 0x01, 0x27, 0x00);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+
+/*
+ * Baseline block following page0:ae RMW.
+ *
+ * NativeColorSpaceProperty default:
+ *
+ *   ctx+81f8 = 0
+ *   -> page0:ad <- 05
+ *
+ * FA:1C board identity forces the local bVar10 used for page0:b3 to 0:
+ *
+ *   page0:b1 <- c0
+ *   page0:b2 <- 00
+ *   page0:b3 <- 00
+ *   page0:b4 <- 55
+ *
+ * The immediate read/clear-bits operation on page0:b4 is P2.2B and is
+ * intentionally not duplicated here.
+ *
+ * Caller must hold state->mailbox_lock.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_program_native_board_baseline_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page)
+{
+	int ret;
+
+	ret = sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x00, 0xad, 0x05);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x00, 0xb1, 0xc0);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x00, 0xb2, 0x00);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x00, 0xb3, 0x00);
+	if (ret)
+		return ret;
+
+	return sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x00, 0xb4, 0x55);
+}
+
+
+/*
+ * AudioInputProperty baseline:
+ *
+ *   ctx+73bc = 3
+ *
+ * Windows expression:
+ *
+ *   ~-(ctx+73bc == 0)
+ *
+ * therefore yields low byte ff for this baseline:
+ *
+ *   page2:27 <- ff
+ *
+ * Caller must hold state->mailbox_lock.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_program_audio_input_baseline_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page)
+{
+	return sc0710_hd60pro_paged_reg_write_locked(
+		dev, cached_page, 0x02, 0x27, 0xff);
+}
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
