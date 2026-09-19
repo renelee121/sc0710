@@ -1063,9 +1063,9 @@ sc0710_hd60pro_paged_reg_read_locked(
  *
  *   [800, 1b, 9c, reg, value]
  *
- * As in Windows, an ordinary write to register 0 does not itself rewrite
- * the software page cache. The cache records the explicit selector command,
- * not an inferred hardware state transition.
+ * Register 0x00 is reserved for the explicit page-selector helper and is
+ * rejected here so an ordinary paged write cannot silently desynchronize
+ * the physical selector from the Linux page cache.
  *
  * Caller must hold state->mailbox_lock.
  * Definition only: no runtime caller in P2.1B.
@@ -1079,6 +1079,15 @@ sc0710_hd60pro_paged_reg_write_locked(
 	u8 value)
 {
 	int ret;
+
+	/*
+	 * Register 0x00 is the recovered page selector itself.  It may only
+	 * be written by sc0710_hd60pro_paged_select_locked(), which uses the
+	 * raw target/register primitive and updates the software cache with
+	 * fail-safe semantics.
+	 */
+	if (reg == 0x00)
+		return -EPERM;
 
 	ret = sc0710_hd60pro_paged_select_locked(
 		dev,
@@ -1097,6 +1106,200 @@ sc0710_hd60pro_paged_reg_write_locked(
 
 	return ret;
 }
+
+
+
+/*
+ * P2.2A: deterministic fragments of the FA:1C frontend program.
+ *
+ * These tables intentionally stop at every recovered ordering barrier:
+ * helper call, register read/modify/write, property-derived value or
+ * device/readback-dependent decision.
+ *
+ * They are not yet a runnable initialization sequence.
+ */
+struct sc0710_hd60pro_paged_write8 {
+	u8 page;
+	u8 reg;
+	u8 value;
+};
+
+
+/*
+ * Apply one already-audited table through the P2.1B paged transport.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: P2.2A adds no runtime caller.
+ */
+static int __maybe_unused
+sc0710_hd60pro_apply_paged_write_table_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page,
+	const struct sc0710_hd60pro_paged_write8 *table,
+	unsigned int count)
+{
+	unsigned int i;
+	int ret;
+
+	if (!dev || !cached_page || (!table && count))
+		return -EINVAL;
+
+	for (i = 0; i < count; i++) {
+		ret = sc0710_hd60pro_paged_reg_write_locked(
+			dev,
+			cached_page,
+			table[i].page,
+			table[i].reg,
+			table[i].value);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+
+/*
+ * FUN_14024dc28:
+ *
+ *   page0:13 <- 08
+ *
+ * Ordering barrier immediately afterward:
+ * FUN_14024eeb8(ctx, 0).
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_before_control_line[] __maybe_unused = {
+	{ 0x00, 0x13, 0x08 },
+};
+
+
+/*
+ * Continues after FUN_14024eeb8(ctx, 0).
+ *
+ * Ordering barrier afterward:
+ * property-derived page1:17/18/19 programming.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_after_control_line[] __maybe_unused = {
+	{ 0x00, 0x41, 0x6f },
+	{ 0x00, 0xb8, 0x00 },
+
+	{ 0x01, 0x0f, 0x02 },
+	{ 0x01, 0x16, 0x30 },
+
+	{ 0x00, 0x64, 0x02 },
+	{ 0x00, 0x65, 0xff },
+	{ 0x00, 0x66, 0x00 },
+	{ 0x00, 0x67, 0x02 },
+};
+
+
+/*
+ * After the page1:17/18/19 decision:
+ *
+ *   page1:1a <- 50
+ *
+ * Ordering barrier afterward:
+ * RMW page1:2a |= 07.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_after_eq[] __maybe_unused = {
+	{ 0x01, 0x1a, 0x50 },
+};
+
+
+/*
+ * The RMW page1:2a is followed by:
+ *
+ *   page2:08 <- 03
+ *
+ * The next barrier is the FA:1C detection/readback section which
+ * eventually programs page1:24 and may touch page1:25/26/27.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_after_rmw_page1_2a[] __maybe_unused = {
+	{ 0x02, 0x08, 0x03 },
+};
+
+
+/*
+ * Continues after page1:24/readback handling.
+ *
+ * Ordering barrier afterward:
+ * RMW page0:ae |= 04, followed by the NativeColorSpace-derived page0:ad.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_after_page1_24_block[] __maybe_unused = {
+	{ 0x01, 0x30, 0x80 },
+	{ 0x01, 0x31, 0x00 },
+	{ 0x01, 0x32, 0x00 },
+
+	{ 0x00, 0xb0, 0x14 },
+};
+
+
+/*
+ * After page0:ae RMW, page0:ad property programming, page0:b1/b2 and
+ * the board-specific page0:b3 value, Windows writes page0:b4 <- 55
+ * before an immediate read/clear-bits RMW of b4.
+ *
+ * Keep only the deterministic fixed writes on the far side of that
+ * dynamic barrier here.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_page2_prefix[] __maybe_unused = {
+	{ 0x02, 0x01, 0x61 },
+	{ 0x02, 0x02, 0xf5 },
+};
+
+
+/*
+ * Continues after RMW page2:03 |= 02.
+ *
+ * Ordering barrier afterward:
+ * RMW page2:25, page2:02 and page2:07.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_page2_body_a[] __maybe_unused = {
+	{ 0x02, 0x04, 0x01 },
+	{ 0x02, 0x05, 0x00 },
+	{ 0x02, 0x06, 0x08 },
+
+	{ 0x02, 0x1c, 0x1a },
+	{ 0x02, 0x1d, 0x00 },
+	{ 0x02, 0x1e, 0x00 },
+	{ 0x02, 0x1f, 0x00 },
+};
+
+
+/*
+ * Continues after RMW page2:25 / 02 / 07.
+ *
+ * Ordering barrier afterward:
+ * RMW page2:21 &= fc.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_page2_body_b[] __maybe_unused = {
+	{ 0x02, 0x17, 0xc0 },
+	{ 0x02, 0x19, 0xff },
+	{ 0x02, 0x1a, 0xff },
+	{ 0x02, 0x1b, 0xfc },
+	{ 0x02, 0x20, 0x00 },
+};
+
+
+/*
+ * After RMW page2:21:
+ *
+ *   page2:22 <- 26
+ *
+ * The next value, page2:27, depends on AudioInputProperty, so it is
+ * intentionally excluded from the static table.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_page2_after_rmw21[] __maybe_unused = {
+	{ 0x02, 0x22, 0x26 },
+};
 
 
 static int
