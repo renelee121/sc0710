@@ -1302,6 +1302,204 @@ sc0710_hd60pro_fa1c_seq_page2_after_rmw21[] __maybe_unused = {
 };
 
 
+
+/*
+ * P2.2B: exact 8-bit read/modify/write operations recovered from the
+ * FA:1C frontend path.
+ *
+ * Windows reads a full DWORD from BAR0+0x10 but truncates it to the low
+ * byte before applying the observed transform:
+ *
+ *     new_value = (old_low8 & and_mask) | or_mask;
+ *
+ * No semantic meaning is assigned to the individual bits here.
+ */
+struct sc0710_hd60pro_paged_rmw8 {
+	u8 page;
+	u8 reg;
+	u8 and_mask;
+	u8 or_mask;
+};
+
+
+/*
+ * Perform one exact low-byte RMW through the P2.1B transport.
+ *
+ * Register 0 is forbidden here because it is the page selector and must
+ * remain under sc0710_hd60pro_paged_select_locked().
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: P2.2B adds no runtime caller.
+ */
+static int __maybe_unused
+sc0710_hd60pro_paged_rmw8_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page,
+	u8 page,
+	u8 reg,
+	u8 and_mask,
+	u8 or_mask)
+{
+	u32 response;
+	u8 value;
+	int ret;
+
+	if (!dev || !cached_page)
+		return -EINVAL;
+
+	if (reg == 0x00)
+		return -EPERM;
+
+	ret = sc0710_hd60pro_paged_reg_read_locked(
+		dev,
+		cached_page,
+		page,
+		reg,
+		&response);
+	if (ret)
+		return ret;
+
+	value = ((u8)response & and_mask) | or_mask;
+
+	return sc0710_hd60pro_paged_reg_write_locked(
+		dev,
+		cached_page,
+		page,
+		reg,
+		value);
+}
+
+
+/*
+ * Apply one contiguous RMW fragment.  Arrays remain split wherever the
+ * Windows path contains an intervening fixed write, helper, property
+ * decision or readback-dependent branch.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller in P2.2B.
+ */
+static int __maybe_unused
+sc0710_hd60pro_apply_paged_rmw_table_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page,
+	const struct sc0710_hd60pro_paged_rmw8 *table,
+	unsigned int count)
+{
+	unsigned int i;
+	int ret;
+
+	if (!dev || !cached_page || (!table && count))
+		return -EINVAL;
+
+	for (i = 0; i < count; i++) {
+		ret = sc0710_hd60pro_paged_rmw8_locked(
+			dev,
+			cached_page,
+			table[i].page,
+			table[i].reg,
+			table[i].and_mask,
+			table[i].or_mask);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+
+/*
+ * After:
+ *   page1:1a <- 50
+ *
+ * Before:
+ *   page2:08 <- 03
+ */
+static const struct sc0710_hd60pro_paged_rmw8
+sc0710_hd60pro_fa1c_rmw_after_eq[] __maybe_unused = {
+	{ 0x01, 0x2a, 0xff, 0x07 },
+};
+
+
+/*
+ * After:
+ *   page1:30 <- 80
+ *   page1:31 <- 00
+ *   page1:32 <- 00
+ *   page0:b0 <- 14
+ *
+ * Before the NativeColorSpace-derived page0:ad write.
+ */
+static const struct sc0710_hd60pro_paged_rmw8
+sc0710_hd60pro_fa1c_rmw_after_page1_24_block[] __maybe_unused = {
+	{ 0x00, 0xae, 0xff, 0x04 },
+};
+
+
+/*
+ * Windows first seeds:
+ *
+ *   page0:b4 <- 55
+ *
+ * then immediately clears bits 1:0 from the readback.
+ */
+static const struct sc0710_hd60pro_paged_rmw8
+sc0710_hd60pro_fa1c_rmw_after_b4_seed[] __maybe_unused = {
+	{ 0x00, 0xb4, 0xfc, 0x00 },
+};
+
+
+/*
+ * After:
+ *   page2:01 <- 61
+ *   page2:02 <- f5
+ *
+ * Before the deterministic page2 body.
+ */
+static const struct sc0710_hd60pro_paged_rmw8
+sc0710_hd60pro_fa1c_rmw_page2_after_prefix[] __maybe_unused = {
+	{ 0x02, 0x03, 0xff, 0x02 },
+};
+
+
+/*
+ * Three consecutive RMWs between the two deterministic page2 bodies.
+ */
+static const struct sc0710_hd60pro_paged_rmw8
+sc0710_hd60pro_fa1c_rmw_page2_middle[] __maybe_unused = {
+	{ 0x02, 0x25, 0xff, 0xa2 },
+	{ 0x02, 0x02, 0xff, 0x80 },
+	{ 0x02, 0x07, 0xff, 0x04 },
+};
+
+
+/*
+ * After page2 body B and before:
+ *
+ *   page2:22 <- 26
+ */
+static const struct sc0710_hd60pro_paged_rmw8
+sc0710_hd60pro_fa1c_rmw_page2_after_body_b[] __maybe_unused = {
+	{ 0x02, 0x21, 0xfc, 0x00 },
+};
+
+
+/*
+ * Final recovered RMW trio after the AudioInput-derived page2:27 write.
+ *
+ * Order is significant:
+ *
+ *   page2:2e = old | a1
+ *   page0:ab = (old & 95) | 15
+ *   page0:ac = (old & d5) | 15
+ */
+static const struct sc0710_hd60pro_paged_rmw8
+sc0710_hd60pro_fa1c_rmw_tail[] __maybe_unused = {
+	{ 0x02, 0x2e, 0xff, 0xa1 },
+	{ 0x00, 0xab, 0x95, 0x15 },
+	{ 0x00, 0xac, 0xd5, 0x15 },
+};
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
