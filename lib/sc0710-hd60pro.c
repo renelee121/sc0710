@@ -166,6 +166,7 @@ sc0710_hd60pro_write_bar0(struct sc0710_dev *dev, u32 offset, u32 value)
 	case HD60PRO_BAR0_MAILBOX_WORD2:
 	case HD60PRO_BAR0_MAILBOX_RESPONSE0:
 	case HD60PRO_BAR0_MAILBOX_RESPONSE1:
+	case HD60PRO_BAR0_MAILBOX_WORD5:
 	case HD60PRO_BAR0_MAILBOX_STATUS:
 		break;
 	default:
@@ -644,6 +645,282 @@ out_verify_pci:
 
 	return ret;
 }
+
+
+/*
+ * P2.1A: raw MZ0380 mode-0 target/register command primitive.
+ *
+ * Recovered Windows request shapes:
+ *
+ *   0x1a: [800, 1a, target, reg, 0]
+ *   0x1b: [800, 1b, target, reg, value]
+ *   0x1c: [800, 1c, target]
+ *   0x1d: [800, 1d, target, reg, {1|8}, value]
+ *
+ * Mode 0 clears BAR0+0x2c, writes request dwords 1..N-1 starting
+ * at BAR0+0x04, triggers BAR0+0x00 with 0x800, and polls
+ * BAR0+0x2c bit 0.
+ *
+ * No retry, IRQ rearm, DMA programming, firmware update, capture
+ * START or PCI bus-master enable occurs here.
+ *
+ * Caller must hold state->mailbox_lock.
+ *
+ * P2.1A is definition-only: no runtime caller is added in this step.
+ */
+static int __maybe_unused
+sc0710_hd60pro_mode0_target_command_locked(
+	struct sc0710_dev *dev,
+	const u32 *request,
+	unsigned int word_count,
+	u32 *response)
+{
+	u32 status = 0;
+	u32 offset;
+	unsigned int i;
+	int ret;
+
+	if (!dev || !request)
+		return -EINVAL;
+
+	if (word_count < 3 || word_count > 6)
+		return -EINVAL;
+
+	if (request[0] != HD60PRO_MAILBOX_TRIGGER_VALUE)
+		return -EINVAL;
+
+	/*
+	 * Keep the primitive closed over only the four request shapes
+	 * recovered for P2.
+	 */
+	switch (request[1]) {
+	case HD60PRO_CMD_I2C_READ_REG8:
+		if (word_count != 5 || request[4] != 0 || !response)
+			return -EINVAL;
+		break;
+
+	case HD60PRO_CMD_I2C_WRITE_REG8:
+		if (word_count != 5 || response)
+			return -EINVAL;
+		break;
+
+	case HD60PRO_CMD_TARGET_READ32:
+		if (word_count != 3 || !response)
+			return -EINVAL;
+		break;
+
+	case HD60PRO_CMD_TARGET_REG_EXTENDED:
+		if (word_count != 6 || response ||
+		    (request[4] != 1 && request[4] != 8))
+			return -EINVAL;
+		break;
+
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	ret = sc0710_hd60pro_write_bar0(
+		dev,
+		HD60PRO_BAR0_MAILBOX_STATUS,
+		0);
+	if (ret)
+		return ret;
+
+	for (i = 1; i < word_count; i++) {
+		offset = HD60PRO_BAR0_MAILBOX_OPCODE +
+			 (i - 1) * sizeof(u32);
+
+		ret = sc0710_hd60pro_write_bar0(
+			dev,
+			offset,
+			request[i]);
+		if (ret)
+			return ret;
+	}
+
+	ret = sc0710_hd60pro_write_bar0(
+		dev,
+		HD60PRO_BAR0_MAILBOX_TRIGGER,
+		HD60PRO_MAILBOX_TRIGGER_VALUE);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < HD60PRO_MAILBOX_POLL_COUNT; i++) {
+		ret = sc0710_hd60pro_read_bar0(
+			dev,
+			HD60PRO_BAR0_MAILBOX_STATUS,
+			&status);
+		if (ret)
+			return ret;
+
+		if (status & HD60PRO_MAILBOX_STATUS_COMPLETE) {
+			if (!response)
+				return 0;
+
+			return sc0710_hd60pro_read_bar0(
+				dev,
+				HD60PRO_BAR0_MAILBOX_RESPONSE1,
+				response);
+		}
+
+		usleep_range(
+			HD60PRO_MAILBOX_POLL_MIN_US,
+			HD60PRO_MAILBOX_POLL_MAX_US);
+	}
+
+	return -ETIMEDOUT;
+}
+
+
+/*
+ * FUN_1402777e4
+ *
+ * [800, 1a, target, reg & 0xff, 0]
+ * success -> BAR0+0x10
+ */
+static int __maybe_unused
+sc0710_hd60pro_target_reg_read_locked(
+	struct sc0710_dev *dev,
+	u8 target,
+	u8 reg,
+	u32 *value)
+{
+	const u32 request[] = {
+		HD60PRO_MAILBOX_TRIGGER_VALUE,
+		HD60PRO_CMD_I2C_READ_REG8,
+		target,
+		reg,
+		0,
+	};
+
+	if (!value)
+		return -EINVAL;
+
+	return sc0710_hd60pro_mode0_target_command_locked(
+		dev,
+		request,
+		ARRAY_SIZE(request),
+		value);
+}
+
+
+/*
+ * FUN_1402851cc
+ *
+ * [800, 1b, target, reg & 0xff, value]
+ */
+static int __maybe_unused
+sc0710_hd60pro_target_reg_write_locked(
+	struct sc0710_dev *dev,
+	u8 target,
+	u8 reg,
+	u8 value)
+{
+	const u32 request[] = {
+		HD60PRO_MAILBOX_TRIGGER_VALUE,
+		HD60PRO_CMD_I2C_WRITE_REG8,
+		target,
+		reg,
+		value,
+	};
+
+	return sc0710_hd60pro_mode0_target_command_locked(
+		dev,
+		request,
+		ARRAY_SIZE(request),
+		NULL);
+}
+
+
+/*
+ * FUN_140277c78
+ *
+ * [800, 1c, target]
+ * success -> BAR0+0x10
+ */
+static int __maybe_unused
+sc0710_hd60pro_target_read32_locked(
+	struct sc0710_dev *dev,
+	u8 target,
+	u32 *value)
+{
+	const u32 request[] = {
+		HD60PRO_MAILBOX_TRIGGER_VALUE,
+		HD60PRO_CMD_TARGET_READ32,
+		target,
+	};
+
+	if (!value)
+		return -EINVAL;
+
+	return sc0710_hd60pro_mode0_target_command_locked(
+		dev,
+		request,
+		ARRAY_SIZE(request),
+		value);
+}
+
+
+/*
+ * FUN_140287b54
+ *
+ * [800, 1d, target, reg & 0xff, 1, byte_value]
+ */
+static int __maybe_unused
+sc0710_hd60pro_extended_reg_write_u8_locked(
+	struct sc0710_dev *dev,
+	u8 target,
+	u8 reg,
+	u8 value)
+{
+	const u32 request[] = {
+		HD60PRO_MAILBOX_TRIGGER_VALUE,
+		HD60PRO_CMD_TARGET_REG_EXTENDED,
+		target,
+		reg,
+		1,
+		value,
+	};
+
+	return sc0710_hd60pro_mode0_target_command_locked(
+		dev,
+		request,
+		ARRAY_SIZE(request),
+		NULL);
+}
+
+
+/*
+ * FUN_140287bd8
+ *
+ * [800, 1d, target, reg & 0xff, 8, dword_value]
+ *
+ * Keep 8 described only as the observed subtype/format selector.
+ * Its firmware-side semantics are not proven yet.
+ */
+static int __maybe_unused
+sc0710_hd60pro_extended_reg_write_u32_locked(
+	struct sc0710_dev *dev,
+	u8 target,
+	u8 reg,
+	u32 value)
+{
+	const u32 request[] = {
+		HD60PRO_MAILBOX_TRIGGER_VALUE,
+		HD60PRO_CMD_TARGET_REG_EXTENDED,
+		target,
+		reg,
+		8,
+		value,
+	};
+
+	return sc0710_hd60pro_mode0_target_command_locked(
+		dev,
+		request,
+		ARRAY_SIZE(request),
+		NULL);
+}
+
 
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
