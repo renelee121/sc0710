@@ -1906,6 +1906,92 @@ sc0710_hd60pro_fa1c_sample_page1_27_locked(
 }
 
 
+
+/*
+ * P2.2D3-B2: FA:1C specialization of FUN_14024eeb8.
+ *
+ * Scope assumptions recovered for this exact board path:
+ *
+ *   descriptor subsystem vendor bytes = FA:1C
+ *   CustomCompanyYunYingTCProperty    = 0
+ *   CustomCompanyBscnPhilipsProperty  = 0
+ *   HotPlugEnableProperty             != 0
+ *
+ * Under those conditions Windows reduces to:
+ *
+ *   signal line 1 value <- !(flags & BIT(4))
+ *   read page0:b7
+ *   b7.bit1 <- !(flags & (BIT(1) | BIT(5)))
+ *   write page0:b7
+ *
+ * All other B7 bits are preserved.
+ *
+ * Observed call-site flag values are deliberately restricted to
+ * 0x00, 0x03 and 0x30.  This is not a generic implementation of every
+ * hardware-family branch present in FUN_14024eeb8.
+ *
+ * Linux deliberately differs from Windows in error handling:
+ * the first transport/read/write error aborts the sequence.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D3-B2.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_apply_control_flags_locked(
+        struct sc0710_dev *dev,
+        u8 *cached_page,
+        u8 flags)
+{
+        u32 response;
+        u8 b7;
+        bool signal_value;
+        int ret;
+
+        if (!dev || !cached_page)
+                return -EINVAL;
+
+        switch (flags) {
+        case 0x00:
+        case 0x03:
+        case 0x30:
+                break;
+        default:
+                return -EPERM;
+        }
+
+        signal_value = !(flags & BIT(4));
+
+        ret = sc0710_hd60pro_signal_write_locked(
+                dev,
+                HD60PRO_SIGNAL_HDMI_HPD,
+                signal_value);
+        if (ret)
+                return ret;
+
+        ret = sc0710_hd60pro_paged_reg_read_locked(
+                dev,
+                cached_page,
+                0x00,
+                0xb7,
+                &response);
+        if (ret)
+                return ret;
+
+        b7 = (u8)response & (u8)~BIT(1);
+
+        if (!(flags & (BIT(1) | BIT(5))))
+                b7 |= BIT(1);
+
+        return sc0710_hd60pro_paged_reg_write_locked(
+                dev,
+                cached_page,
+                0x00,
+                0xb7,
+                b7);
+}
+
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
