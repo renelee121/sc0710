@@ -1698,6 +1698,83 @@ sc0710_hd60pro_fa1c_program_audio_input_baseline_locked(
 }
 
 
+
+/*
+ * P2.2D1: two small ordered helper sequences recovered from the
+ * FA:1C FUN_14024dc28 path.
+ *
+ * These remain definition-only.  They are intentionally kept separate
+ * from FUN_14024eeb8, FUN_14024ea94 and FUN_14024d2ec, whose ordering and
+ * side effects are modeled in later P2.2D steps.
+ */
+
+
+/*
+ * FUN_14024d2a4:
+ *
+ *   page0:b8 <- 10
+ *   page0:b8 <- 00
+ *
+ * Preserve both writes and their order.  Do not collapse them into a
+ * final-state assignment; the intermediate transition may be meaningful
+ * to the device.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_b8_write_pair[] __maybe_unused = {
+        { 0x00, 0xb8, 0x10 },
+        { 0x00, 0xb8, 0x00 },
+};
+
+
+/*
+ * FUN_14024db30:
+ *
+ *   page2:07 <- f4
+ *   page2:07 <- 04
+ *
+ * As above, preserve the ordered pair exactly.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_page2_07_write_pair[] __maybe_unused = {
+        { 0x02, 0x07, 0xf4 },
+        { 0x02, 0x07, 0x04 },
+};
+
+
+/*
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller in P2.2D1.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_apply_b8_pair_locked(
+        struct sc0710_dev *dev,
+        u8 *cached_page)
+{
+        return sc0710_hd60pro_apply_paged_write_table_locked(
+                dev,
+                cached_page,
+                sc0710_hd60pro_fa1c_b8_write_pair,
+                ARRAY_SIZE(sc0710_hd60pro_fa1c_b8_write_pair));
+}
+
+
+/*
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller in P2.2D1.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_apply_page2_07_pair_locked(
+        struct sc0710_dev *dev,
+        u8 *cached_page)
+{
+        return sc0710_hd60pro_apply_paged_write_table_locked(
+                dev,
+                cached_page,
+                sc0710_hd60pro_fa1c_page2_07_write_pair,
+                ARRAY_SIZE(sc0710_hd60pro_fa1c_page2_07_write_pair));
+}
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
