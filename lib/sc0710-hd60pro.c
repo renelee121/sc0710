@@ -1775,6 +1775,81 @@ sc0710_hd60pro_fa1c_apply_page2_07_pair_locked(
 }
 
 
+
+/*
+ * P2.2D2: hardware-visible portion of FUN_14024ea94.
+ *
+ * Recovered ordering:
+ *
+ *   page1:25 <- 00
+ *   page1:26 <- 00
+ *
+ *   repeat 5 times:
+ *       delay ~20 ms
+ *       read page1:27
+ *
+ * Windows stores the samples in software/global state.  Linux P2 keeps
+ * them caller-owned instead; this helper models the hardware interaction
+ * without introducing another persistent state machine.
+ *
+ * This is distinct from the later page1:24 readback path, where Windows
+ * may WRITE page1:27 <- 00 five times.
+ */
+#define HD60PRO_FA1C_PAGE1_27_SAMPLE_COUNT       5U
+#define HD60PRO_FA1C_PAGE1_27_SAMPLE_DELAY_MS    20U
+
+
+/*
+ * Caller must hold state->mailbox_lock.
+ * Definition only: P2.2D2 adds no runtime caller.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_sample_page1_27_locked(
+        struct sc0710_dev *dev,
+        u8 *cached_page,
+        u32 samples[HD60PRO_FA1C_PAGE1_27_SAMPLE_COUNT])
+{
+        unsigned int i;
+        int ret;
+
+        if (!dev || !cached_page || !samples)
+                return -EINVAL;
+
+        ret = sc0710_hd60pro_paged_reg_write_locked(
+                dev,
+                cached_page,
+                0x01,
+                0x25,
+                0x00);
+        if (ret)
+                return ret;
+
+        ret = sc0710_hd60pro_paged_reg_write_locked(
+                dev,
+                cached_page,
+                0x01,
+                0x26,
+                0x00);
+        if (ret)
+                return ret;
+
+        for (i = 0; i < HD60PRO_FA1C_PAGE1_27_SAMPLE_COUNT; i++) {
+                msleep(HD60PRO_FA1C_PAGE1_27_SAMPLE_DELAY_MS);
+
+                ret = sc0710_hd60pro_paged_reg_read_locked(
+                        dev,
+                        cached_page,
+                        0x01,
+                        0x27,
+                        &samples[i]);
+                if (ret)
+                        return ret;
+        }
+
+        return 0;
+}
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
