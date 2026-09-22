@@ -648,10 +648,11 @@ out_verify_pci:
 
 
 /*
- * P2.1A: raw MZ0380 mode-0 target/register command primitive.
+ * P2: raw MZ0380 mode-0 command primitive.
  *
  * Recovered Windows request shapes:
  *
+ *   0x15: [800, 15, mask, value]
  *   0x1a: [800, 1a, target, reg, 0]
  *   0x1b: [800, 1b, target, reg, value]
  *   0x1c: [800, 1c, target]
@@ -666,7 +667,8 @@ out_verify_pci:
  *
  * Caller must hold state->mailbox_lock.
  *
- * P2.1A is definition-only: no runtime caller is added in this step.
+ * P2 helpers may call this primitive, but it remains unreachable from
+ * the active bringup path in P2.2D3-B1.
  */
 
 /*
@@ -680,7 +682,7 @@ out_verify_pci:
 #define HD60PRO_PAGED_PAGE_CACHE_INVALID    0xffU
 
 static int __maybe_unused
-sc0710_hd60pro_mode0_target_command_locked(
+sc0710_hd60pro_mode0_command_locked(
 	struct sc0710_dev *dev,
 	const u32 *request,
 	unsigned int word_count,
@@ -701,10 +703,20 @@ sc0710_hd60pro_mode0_target_command_locked(
 		return -EINVAL;
 
 	/*
-	 * Keep the primitive closed over only the four request shapes
-	 * recovered for P2.
+	 * Keep the primitive closed over only the request shapes
+	 * statically recovered and explicitly admitted for P2.
 	 */
 	switch (request[1]) {
+	case HD60PRO_CMD_SIGNAL_WRITE:
+		if (word_count != 4 || response)
+			return -EINVAL;
+
+		if (request[2] != BIT(HD60PRO_SIGNAL_HDMI_HPD) ||
+		    (request[3] != 0 &&
+		     request[3] != BIT(HD60PRO_SIGNAL_HDMI_HPD)))
+			return -EPERM;
+		break;
+
 	case HD60PRO_CMD_I2C_READ_REG8:
 		if (word_count != 5 || request[4] != 0 || !response)
 			return -EINVAL;
@@ -783,6 +795,50 @@ sc0710_hd60pro_mode0_target_command_locked(
 }
 
 
+
+/*
+ * P2.2D3-B1: restricted signal-value update recovered from
+ * FUN_140287d00.
+ *
+ * Windows request:
+ *
+ *   [800, 15, 1 << line, state << line]
+ *
+ * P2 deliberately permits only the proven HDMI_HPD line (line 1).
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D3-B1.
+ */
+static int __maybe_unused
+sc0710_hd60pro_signal_write_locked(
+        struct sc0710_dev *dev,
+        u8 signal_index,
+        bool value)
+{
+        u32 mask;
+        u32 request[4];
+
+        if (!dev)
+                return -EINVAL;
+
+        if (signal_index != HD60PRO_SIGNAL_HDMI_HPD)
+                return -EPERM;
+
+        mask = BIT(signal_index);
+
+        request[0] = HD60PRO_MAILBOX_TRIGGER_VALUE;
+        request[1] = HD60PRO_CMD_SIGNAL_WRITE;
+        request[2] = mask;
+        request[3] = value ? mask : 0;
+
+        return sc0710_hd60pro_mode0_command_locked(
+                dev,
+                request,
+                ARRAY_SIZE(request),
+                NULL);
+}
+
+
 /*
  * FUN_1402777e4
  *
@@ -807,7 +863,7 @@ sc0710_hd60pro_target_reg_read_locked(
 	if (!value)
 		return -EINVAL;
 
-	return sc0710_hd60pro_mode0_target_command_locked(
+	return sc0710_hd60pro_mode0_command_locked(
 		dev,
 		request,
 		ARRAY_SIZE(request),
@@ -835,7 +891,7 @@ sc0710_hd60pro_target_reg_write_locked(
 		value,
 	};
 
-	return sc0710_hd60pro_mode0_target_command_locked(
+	return sc0710_hd60pro_mode0_command_locked(
 		dev,
 		request,
 		ARRAY_SIZE(request),
@@ -864,7 +920,7 @@ sc0710_hd60pro_target_read32_locked(
 	if (!value)
 		return -EINVAL;
 
-	return sc0710_hd60pro_mode0_target_command_locked(
+	return sc0710_hd60pro_mode0_command_locked(
 		dev,
 		request,
 		ARRAY_SIZE(request),
@@ -893,7 +949,7 @@ sc0710_hd60pro_extended_reg_write_u8_locked(
 		value,
 	};
 
-	return sc0710_hd60pro_mode0_target_command_locked(
+	return sc0710_hd60pro_mode0_command_locked(
 		dev,
 		request,
 		ARRAY_SIZE(request),
@@ -925,7 +981,7 @@ sc0710_hd60pro_extended_reg_write_u32_locked(
 		value,
 	};
 
-	return sc0710_hd60pro_mode0_target_command_locked(
+	return sc0710_hd60pro_mode0_command_locked(
 		dev,
 		request,
 		ARRAY_SIZE(request),
