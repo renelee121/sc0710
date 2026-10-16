@@ -2217,6 +2217,118 @@ sc0710_hd60pro_fa1c_program_page80_baseline_locked(
 
 
 
+
+/*
+ * P2.2D4-B3: exact FA:1C baseline composition of FUN_14024d2ec.
+ *
+ * These fragments are intentionally separate from older frontend tables.
+ * Although some registers overlap, their transformations are different:
+ *
+ *   page2:04 is RMW old | 01 here, not a fixed write of 01.
+ *   page0:ac is RMW old | 80 here, not (old & d5) | 15.
+ *
+ * Exact recovered order:
+ *
+ *   page2:01 = (old & 0f) | 60
+ *   page2:04 = old | 01
+ *   page2:06 = 08
+ *   page2:09 = old | 20
+ *   page0:54 = old & ef
+ *   page0:ac = old | 80
+ *   raw reg00/CE/CF bit7 window
+ *   baseline page80 D0/CF programming
+ *
+ * Linux is deliberately fail-stop on the first error.
+ */
+static const struct sc0710_hd60pro_paged_rmw8
+sc0710_hd60pro_fa1c_d2ec_rmw_before_page2_06[] __maybe_unused = {
+	{ 0x02, 0x01, 0x0f, 0x60 },
+	{ 0x02, 0x04, 0xff, 0x01 },
+};
+
+
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_d2ec_page2_06_write[] __maybe_unused = {
+	{ 0x02, 0x06, 0x08 },
+};
+
+
+static const struct sc0710_hd60pro_paged_rmw8
+sc0710_hd60pro_fa1c_d2ec_rmw_after_page2_06[] __maybe_unused = {
+	{ 0x02, 0x09, 0xff, 0x20 },
+	{ 0x00, 0x54, 0xef, 0x00 },
+	{ 0x00, 0xac, 0xff, 0x80 },
+};
+
+
+/*
+ * FA:1C/property-default specialization of FUN_14024d2ec.
+ *
+ * The final page0:ac RMW guarantees cached_page == 0x00 before
+ * entering the raw reg00 window.
+ *
+ * The raw window invalidates cached_page.  The page80 baseline helper
+ * requires that invalid state and explicitly reselects page 0x80.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D4-B3.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_apply_d2ec_baseline_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page)
+{
+	int ret;
+
+	if (!dev || !cached_page)
+		return -EINVAL;
+
+	ret = sc0710_hd60pro_apply_paged_rmw_table_locked(
+		dev,
+		cached_page,
+		sc0710_hd60pro_fa1c_d2ec_rmw_before_page2_06,
+		ARRAY_SIZE(
+			sc0710_hd60pro_fa1c_d2ec_rmw_before_page2_06));
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev,
+		cached_page,
+		sc0710_hd60pro_fa1c_d2ec_page2_06_write,
+		ARRAY_SIZE(
+			sc0710_hd60pro_fa1c_d2ec_page2_06_write));
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_apply_paged_rmw_table_locked(
+		dev,
+		cached_page,
+		sc0710_hd60pro_fa1c_d2ec_rmw_after_page2_06,
+		ARRAY_SIZE(
+			sc0710_hd60pro_fa1c_d2ec_rmw_after_page2_06));
+	if (ret)
+		return ret;
+
+	if (*cached_page != 0x00)
+		return -EIO;
+
+	ret = sc0710_hd60pro_fa1c_reg00_bit7_window_locked(
+		dev,
+		cached_page);
+	if (ret)
+		return ret;
+
+	if (*cached_page != HD60PRO_PAGED_PAGE_CACHE_INVALID)
+		return -EIO;
+
+	return sc0710_hd60pro_fa1c_program_page80_baseline_locked(
+		dev,
+		cached_page);
+}
+
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
