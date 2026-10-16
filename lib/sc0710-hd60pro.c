@@ -682,6 +682,13 @@ out_verify_pci:
 #define HD60PRO_FRONTEND_PAGED_TARGET       0x9cU
 #define HD60PRO_PAGED_PAGE_CACHE_INVALID    0xffU
 
+enum sc0710_hd60pro_target98_variant {
+	HD60PRO_TARGET98_VARIANT_UNKNOWN = 0,
+	HD60PRO_TARGET98_VARIANT_1 = 1,
+	HD60PRO_TARGET98_VARIANT_2 = 2,
+};
+
+
 static int __maybe_unused
 sc0710_hd60pro_mode0_command_locked(
 	struct sc0710_dev *dev,
@@ -932,6 +939,92 @@ sc0710_hd60pro_target98_reg_read_locked(
 		reg,
 		value);
 }
+
+/*
+ * P2.2D6-B2: read-only target-0x98 signature probe recovered from
+ * FUN_14024b728.
+ *
+ * Windows unconditionally reads, in this exact order:
+ *
+ *   0x01 -> 0x02 -> 0x03 -> 0x05
+ *
+ * and classifies the low-byte responses as:
+ *
+ *   variant 1:
+ *     reg01 == 0xca
+ *     reg02 == 0x11
+ *     reg03 == 0x16
+ *     reg05.bit5 == 1
+ *
+ *   variant 2:
+ *     reg01 == 0x49
+ *     reg02 == 0x12
+ *     reg03 == 0x16
+ *
+ * Anything else remains UNKNOWN.
+ *
+ * This helper deliberately models only the read/classification portion
+ * of FUN_14024b728.  It does not model FUN_14024be70, FUN_14024ab30,
+ * FUN_14024b03c or any subsequent configuration.
+ *
+ * Linux also remains fail-closed on mailbox transport errors: an error
+ * is propagated to the caller and the output remains UNKNOWN.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D6-B2.
+ */
+static int __maybe_unused
+sc0710_hd60pro_target98_probe_variant_locked(
+	struct sc0710_dev *dev,
+	enum sc0710_hd60pro_target98_variant *variant)
+{
+	u32 reg01;
+	u32 reg02;
+	u32 reg03;
+	u32 reg05;
+	int ret;
+
+	if (!dev || !variant)
+		return -EINVAL;
+
+	*variant = HD60PRO_TARGET98_VARIANT_UNKNOWN;
+
+	ret = sc0710_hd60pro_target98_reg_read_locked(
+		dev, 0x01, &reg01);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_read_locked(
+		dev, 0x02, &reg02);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_read_locked(
+		dev, 0x03, &reg03);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_read_locked(
+		dev, 0x05, &reg05);
+	if (ret)
+		return ret;
+
+	if ((u8)reg01 == 0xca &&
+	    (u8)reg02 == 0x11 &&
+	    (u8)reg03 == 0x16 &&
+	    (reg05 & BIT(5))) {
+		*variant = HD60PRO_TARGET98_VARIANT_1;
+		return 0;
+	}
+
+	if ((u8)reg01 == 0x49 &&
+	    (u8)reg02 == 0x12 &&
+	    (u8)reg03 == 0x16)
+		*variant = HD60PRO_TARGET98_VARIANT_2;
+
+	return 0;
+}
+
 
 
 
