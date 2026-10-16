@@ -1108,6 +1108,131 @@ sc0710_hd60pro_target98_reg_write_locked(
 		value);
 }
 
+/*
+ * P2.2D6-B3B: hardware portion recovered from FUN_14024be70.
+ *
+ * Windows writes target 0x98 register 0x05 to 0x00 and then updates
+ * Windows-private object state.  Only the hardware write is modeled
+ * here; no equivalent for that private software field is invented.
+ *
+ * Linux propagates a mailbox failure rather than silently continuing.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D6-B3B.
+ */
+static int __maybe_unused
+sc0710_hd60pro_target98_apply_be70_locked(struct sc0710_dev *dev)
+{
+	if (!dev)
+		return -EINVAL;
+
+	return sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0x05, 0x00);
+}
+
+/*
+ * P2.2D6-B3B: fixed target-0x98 initialization sequence recovered
+ * from FUN_14024ab30.
+ *
+ * Exact observed order:
+ *
+ *   0x04 = 0x3d
+ *   sleep 5 ms
+ *   0x04 = 0x1d
+ *   0x61 = 0x30
+ *   0x09 = 0xb2
+ *   0x0a = 0xf8
+ *   0x0b = 0x37
+ *   0xc9..0xd0 = 0x00
+ *
+ * Windows ignores the individual write return values.  Linux remains
+ * fail-closed and propagates the first mailbox error instead.
+ *
+ * This helper does not perform variant detection or gating.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D6-B3B.
+ */
+static int __maybe_unused
+sc0710_hd60pro_target98_apply_ab30_locked(struct sc0710_dev *dev)
+{
+	int ret;
+
+	if (!dev)
+		return -EINVAL;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0x04, 0x3d);
+	if (ret)
+		return ret;
+
+	msleep(5);
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0x04, 0x1d);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0x61, 0x30);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0x09, 0xb2);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0x0a, 0xf8);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0x0b, 0x37);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0xc9, 0x00);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0xca, 0x00);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0xcb, 0x00);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0xcc, 0x00);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0xcd, 0x00);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0xce, 0x00);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0xcf, 0x00);
+	if (ret)
+		return ret;
+
+	return sc0710_hd60pro_target98_reg_write_locked(
+		dev, 0xd0, 0x00);
+}
+
+
 
 
 /*
