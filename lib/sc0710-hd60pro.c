@@ -2350,6 +2350,82 @@ sc0710_hd60pro_fa1c_apply_d2ec_baseline_locked(
 
 
 
+
+/*
+ * P2.2D5-B2: exact initial signal-index sequence recovered from
+ * FUN_14024dc28 for the FA:1C frontend path.
+ *
+ * Observed order:
+ *
+ *   line 9 <- 1
+ *   sleep 50 ms
+ *   line 9 <- 0
+ *   sleep 50 ms
+ *   line 9 <- 1
+ *   sleep 50 ms
+ *   line 8 <- 0
+ *   sleep 50 ms
+ *
+ * HD60PRO_SIGNAL_FRONTEND_RESET_N and HD60PRO_SIGNAL_FRONTEND_CTRL
+ * are existing software names for indices 9 and 8 respectively.  This
+ * helper does not infer broader physical GPIO semantics from those names.
+ *
+ * Linux is fail-stop on every signal-write failure.  No delay is performed
+ * after a failed write.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D5-B2.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_apply_signal_prefix_locked(
+	struct sc0710_dev *dev)
+{
+	int ret;
+
+	if (!dev)
+		return -EINVAL;
+
+	ret = sc0710_hd60pro_signal_write_locked(
+		dev,
+		HD60PRO_SIGNAL_FRONTEND_RESET_N,
+		true);
+	if (ret)
+		return ret;
+
+	msleep(50);
+
+	ret = sc0710_hd60pro_signal_write_locked(
+		dev,
+		HD60PRO_SIGNAL_FRONTEND_RESET_N,
+		false);
+	if (ret)
+		return ret;
+
+	msleep(50);
+
+	ret = sc0710_hd60pro_signal_write_locked(
+		dev,
+		HD60PRO_SIGNAL_FRONTEND_RESET_N,
+		true);
+	if (ret)
+		return ret;
+
+	msleep(50);
+
+	ret = sc0710_hd60pro_signal_write_locked(
+		dev,
+		HD60PRO_SIGNAL_FRONTEND_CTRL,
+		false);
+	if (ret)
+		return ret;
+
+	msleep(50);
+
+	return 0;
+}
+
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
