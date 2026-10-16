@@ -711,9 +711,21 @@ sc0710_hd60pro_mode0_command_locked(
 		if (word_count != 4 || response)
 			return -EINVAL;
 
-		if (request[2] != BIT(HD60PRO_SIGNAL_HDMI_HPD) ||
-		    (request[3] != 0 &&
-		     request[3] != BIT(HD60PRO_SIGNAL_HDMI_HPD)))
+		/*
+		 * Keep opcode 0x15 closed over the exact single-line masks
+		 * recovered for the current P2 FA:1C work.  Combined masks
+		 * and every other line remain forbidden.
+		 */
+		switch (request[2]) {
+		case BIT(HD60PRO_SIGNAL_HDMI_HPD):
+		case BIT(HD60PRO_SIGNAL_FRONTEND_CTRL):
+		case BIT(HD60PRO_SIGNAL_FRONTEND_RESET_N):
+			break;
+		default:
+			return -EPERM;
+		}
+
+		if (request[3] != 0 && request[3] != request[2])
 			return -EPERM;
 		break;
 
@@ -804,10 +816,13 @@ sc0710_hd60pro_mode0_command_locked(
  *
  *   [800, 15, 1 << line, state << line]
  *
- * P2 deliberately permits only the proven HDMI_HPD line (line 1).
+ * P2 deliberately permits only the exact recovered single-line indices
+ * currently required by the FA:1C reconstruction: 1, 8 and 9.
+ *
+ * This is an admission boundary, not a claim about generic GPIO semantics.
  *
  * Caller must hold state->mailbox_lock.
- * Definition only: no runtime caller is added in P2.2D3-B1.
+ * Definition only: no runtime caller is added in P2.2D5-B1.
  */
 static int __maybe_unused
 sc0710_hd60pro_signal_write_locked(
@@ -821,8 +836,14 @@ sc0710_hd60pro_signal_write_locked(
         if (!dev)
                 return -EINVAL;
 
-        if (signal_index != HD60PRO_SIGNAL_HDMI_HPD)
+        switch (signal_index) {
+        case HD60PRO_SIGNAL_HDMI_HPD:
+        case HD60PRO_SIGNAL_FRONTEND_CTRL:
+        case HD60PRO_SIGNAL_FRONTEND_RESET_N:
+                break;
+        default:
                 return -EPERM;
+        }
 
         mask = BIT(signal_index);
 
