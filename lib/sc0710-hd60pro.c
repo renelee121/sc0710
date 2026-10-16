@@ -678,6 +678,7 @@ out_verify_pci:
  * 0x00, 0x01, 0x02 and 0x80.  Keep the Linux reconstruction closed
  * over only that proven set for now.
  */
+#define HD60PRO_FRONTEND_AUX_TARGET         0x98U
 #define HD60PRO_FRONTEND_PAGED_TARGET       0x9cU
 #define HD60PRO_PAGED_PAGE_CACHE_INVALID    0xffU
 
@@ -890,6 +891,48 @@ sc0710_hd60pro_target_reg_read_locked(
 		ARRAY_SIZE(request),
 		value);
 }
+
+/*
+ * P2.2D6-B1: narrow target-0x98 read wrapper for the register set
+ * statically observed in FUN_1402485e0.
+ *
+ * Recovered probe register set:
+ *
+ *   0x01, 0x02, 0x03, 0x05
+ *
+ * This helper deliberately does not encode probe ordering, variant
+ * recognition or initialization policy yet.  It only establishes a
+ * fail-closed Linux admission boundary around the known read set.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D6-B1.
+ */
+static int __maybe_unused
+sc0710_hd60pro_target98_reg_read_locked(
+	struct sc0710_dev *dev,
+	u8 reg,
+	u32 *value)
+{
+	if (!dev || !value)
+		return -EINVAL;
+
+	switch (reg) {
+	case 0x01:
+	case 0x02:
+	case 0x03:
+	case 0x05:
+		break;
+	default:
+		return -EPERM;
+	}
+
+	return sc0710_hd60pro_target_reg_read_locked(
+		dev,
+		HD60PRO_FRONTEND_AUX_TARGET,
+		reg,
+		value);
+}
+
 
 
 /*
