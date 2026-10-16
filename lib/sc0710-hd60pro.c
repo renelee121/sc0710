@@ -2456,6 +2456,282 @@ sc0710_hd60pro_fa1c_seq_after_control_flags_30[] __maybe_unused = {
 
 
 
+
+/*
+ * P2.2D5-C1: complete hardware-facing FA:1C/property-default
+ * specialization of Windows FUN_14024dc28.
+ *
+ * Narrow scope:
+ *
+ *   PCI device                         12ab:0380
+ *   subsystem                          1cfa:0006
+ *   first-init/default property path
+ *   AnalogCrossbarVideoInputProperty   0
+ *   CustomCompanyCodyyProperty         0
+ *
+ * All hardware-facing pieces were modeled and frozen separately before
+ * this compositor.  This function preserves their recovered ordering and
+ * fails immediately on the first Linux transport/read/write error.
+ *
+ * Windows stores the five FUN_14024ea94 page1:27 samples in its own
+ * software/global state.  Linux deliberately keeps those samples
+ * caller-owned, so this compositor exposes page1_27_samples rather than
+ * inventing persistent state or discarding the readings.
+ *
+ * Windows also clears several private software fields near the beginning
+ * of FUN_14024dc28.  They have no direct Linux equivalent here.  The
+ * selector-cache invariant does, so cached_page is invalidated after the
+ * initial signal prefix and before the first paged access.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D5-C1.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_apply_24dc28_baseline_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page,
+	u32 page1_27_samples[HD60PRO_FA1C_PAGE1_27_SAMPLE_COUNT])
+{
+	int ret;
+
+	if (!dev || !cached_page || !page1_27_samples)
+		return -EINVAL;
+
+	/* 01 */
+	ret = sc0710_hd60pro_fa1c_apply_signal_prefix_locked(dev);
+	if (ret)
+		return ret;
+
+	/* 02 */
+	*cached_page = HD60PRO_PAGED_PAGE_CACHE_INVALID;
+
+	/* 03 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_before_control_line,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_seq_before_control_line));
+	if (ret)
+		return ret;
+
+	/* 04: FUN_14024eeb8(ctx, 0). */
+	ret = sc0710_hd60pro_fa1c_apply_control_flags_locked(
+		dev, cached_page, 0x00);
+	if (ret)
+		return ret;
+
+	/* 05 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_after_control_line,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_seq_after_control_line));
+	if (ret)
+		return ret;
+
+	/* 06 */
+	ret = sc0710_hd60pro_fa1c_program_eq_baseline_locked(
+		dev, cached_page);
+	if (ret)
+		return ret;
+
+	/* 07 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_after_eq,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_seq_after_eq));
+	if (ret)
+		return ret;
+
+	/* 08 */
+	ret = sc0710_hd60pro_apply_paged_rmw_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_rmw_after_eq,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_rmw_after_eq));
+	if (ret)
+		return ret;
+
+	/* 09 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_after_rmw_page1_2a,
+		ARRAY_SIZE(
+			sc0710_hd60pro_fa1c_seq_after_rmw_page1_2a));
+	if (ret)
+		return ret;
+
+	/* 10: FUN_14024ea94, samples remain caller-owned. */
+	ret = sc0710_hd60pro_fa1c_sample_page1_27_locked(
+		dev,
+		cached_page,
+		page1_27_samples);
+	if (ret)
+		return ret;
+
+	/* 11 */
+	ret = sc0710_hd60pro_fa1c_program_page1_24_baseline_locked(
+		dev, cached_page);
+	if (ret)
+		return ret;
+
+	/* 12 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_after_page1_24_block,
+		ARRAY_SIZE(
+			sc0710_hd60pro_fa1c_seq_after_page1_24_block));
+	if (ret)
+		return ret;
+
+	/* 13 */
+	ret = sc0710_hd60pro_apply_paged_rmw_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_rmw_after_page1_24_block,
+		ARRAY_SIZE(
+			sc0710_hd60pro_fa1c_rmw_after_page1_24_block));
+	if (ret)
+		return ret;
+
+	/* 14 */
+	ret = sc0710_hd60pro_fa1c_program_native_board_baseline_locked(
+		dev, cached_page);
+	if (ret)
+		return ret;
+
+	/* 15 */
+	ret = sc0710_hd60pro_apply_paged_rmw_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_rmw_after_b4_seed,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_rmw_after_b4_seed));
+	if (ret)
+		return ret;
+
+	/* 16 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_page2_prefix,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_seq_page2_prefix));
+	if (ret)
+		return ret;
+
+	/* 17 */
+	ret = sc0710_hd60pro_apply_paged_rmw_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_rmw_page2_after_prefix,
+		ARRAY_SIZE(
+			sc0710_hd60pro_fa1c_rmw_page2_after_prefix));
+	if (ret)
+		return ret;
+
+	/* 18 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_page2_body_a,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_seq_page2_body_a));
+	if (ret)
+		return ret;
+
+	/* 19 */
+	ret = sc0710_hd60pro_apply_paged_rmw_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_rmw_page2_middle,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_rmw_page2_middle));
+	if (ret)
+		return ret;
+
+	/* 20 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_page2_body_b,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_seq_page2_body_b));
+	if (ret)
+		return ret;
+
+	/* 21 */
+	ret = sc0710_hd60pro_apply_paged_rmw_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_rmw_page2_after_body_b,
+		ARRAY_SIZE(
+			sc0710_hd60pro_fa1c_rmw_page2_after_body_b));
+	if (ret)
+		return ret;
+
+	/* 22 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_page2_after_rmw21,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_seq_page2_after_rmw21));
+	if (ret)
+		return ret;
+
+	/* 23 */
+	ret = sc0710_hd60pro_fa1c_program_audio_input_baseline_locked(
+		dev, cached_page);
+	if (ret)
+		return ret;
+
+	/* 24 */
+	ret = sc0710_hd60pro_apply_paged_rmw_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_rmw_tail,
+		ARRAY_SIZE(sc0710_hd60pro_fa1c_rmw_tail));
+	if (ret)
+		return ret;
+
+	/* 25: FUN_14024eeb8(ctx, 0). */
+	ret = sc0710_hd60pro_fa1c_apply_control_flags_locked(
+		dev, cached_page, 0x00);
+	if (ret)
+		return ret;
+
+	/* 26: FUN_14024d2a4. */
+	ret = sc0710_hd60pro_fa1c_apply_b8_pair_locked(
+		dev, cached_page);
+	if (ret)
+		return ret;
+
+	/* 27: FUN_14024db30. */
+	ret = sc0710_hd60pro_fa1c_apply_page2_07_pair_locked(
+		dev, cached_page);
+	if (ret)
+		return ret;
+
+	/* 28 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_before_control_flags_30,
+		ARRAY_SIZE(
+			sc0710_hd60pro_fa1c_seq_before_control_flags_30));
+	if (ret)
+		return ret;
+
+	/* 29: FUN_14024eeb8(ctx, 0x30). */
+	ret = sc0710_hd60pro_fa1c_apply_control_flags_locked(
+		dev, cached_page, 0x30);
+	if (ret)
+		return ret;
+
+	/* 30 */
+	ret = sc0710_hd60pro_apply_paged_write_table_locked(
+		dev, cached_page,
+		sc0710_hd60pro_fa1c_seq_after_control_flags_30,
+		ARRAY_SIZE(
+			sc0710_hd60pro_fa1c_seq_after_control_flags_30));
+	if (ret)
+		return ret;
+
+	/* 31: FUN_14024d2ec. */
+	ret = sc0710_hd60pro_fa1c_apply_d2ec_baseline_locked(
+		dev, cached_page);
+	if (ret)
+		return ret;
+
+	/* 32: baseline +981c=0, +73a8=0 settling delay. */
+	msleep(300);
+
+	return 0;
+}
+
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
