@@ -2426,6 +2426,36 @@ sc0710_hd60pro_fa1c_apply_signal_prefix_locked(
 
 
 
+
+/*
+ * P2.2D5-B3: two deterministic fixed writes from the FA:1C
+ * FUN_14024dc28 tail.
+ *
+ * They intentionally remain separate because Windows executes:
+ *
+ *   page0:51 <- 89
+ *   FUN_14024eeb8(ctx, 0x30)
+ *   page0:b7 <- 00
+ *   FUN_14024d2ec(ctx)
+ *
+ * The intervening helper call is an ordering barrier.  Do not merge these
+ * writes into one contiguous table.
+ *
+ * Definition only: no runtime caller is added in P2.2D5-B3.
+ */
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_before_control_flags_30[] __maybe_unused = {
+	{ 0x00, 0x51, 0x89 },
+};
+
+
+static const struct sc0710_hd60pro_paged_write8
+sc0710_hd60pro_fa1c_seq_after_control_flags_30[] __maybe_unused = {
+	{ 0x00, 0xb7, 0x00 },
+};
+
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
