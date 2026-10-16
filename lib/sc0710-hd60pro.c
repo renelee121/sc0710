@@ -1055,6 +1055,60 @@ sc0710_hd60pro_target_reg_write_locked(
 		NULL);
 }
 
+/*
+ * P2.2D6-B3A: fail-closed target-0x98 write admission recovered from
+ * the recognized-variant initialization path.
+ *
+ * Known register set:
+ *
+ *   0x05
+ *   0x04, 0x61, 0x09, 0x0a, 0x0b
+ *   0xc9..0xd0
+ *
+ * This helper only establishes the known register write boundary.
+ * It does not encode write values, ordering, delays, variant gating,
+ * or Windows-private software state.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D6-B3A.
+ */
+static int __maybe_unused
+sc0710_hd60pro_target98_reg_write_locked(
+	struct sc0710_dev *dev,
+	u8 reg,
+	u8 value)
+{
+	if (!dev)
+		return -EINVAL;
+
+	switch (reg) {
+	case 0x04:
+	case 0x05:
+	case 0x09:
+	case 0x0a:
+	case 0x0b:
+	case 0x61:
+	case 0xc9:
+	case 0xca:
+	case 0xcb:
+	case 0xcc:
+	case 0xcd:
+	case 0xce:
+	case 0xcf:
+	case 0xd0:
+		break;
+	default:
+		return -EPERM;
+	}
+
+	return sc0710_hd60pro_target_reg_write_locked(
+		dev,
+		HD60PRO_FRONTEND_AUX_TARGET,
+		reg,
+		value);
+}
+
+
 
 /*
  * FUN_140277c78
