@@ -2126,6 +2126,97 @@ sc0710_hd60pro_fa1c_reg00_bit7_window_locked(
 
 
 
+
+/*
+ * P2.2D4-B2: final page-0x80 baseline block recovered from
+ * FUN_14024d2ec.
+ *
+ * Baseline assumptions already established for the FA:1C path:
+ *
+ *   ctx+0x9810 = 0
+ *   ctx+0x81dc = 1
+ *
+ * Windows uses:
+ *
+ *   table = { 6, 0, 4, 3, 7, 1 }
+ *   code  = table[(ctx+0x81dc) % 6]
+ *
+ * Therefore the baseline code is zero and the final transformation is:
+ *
+ *   D0.bits[1:0] <- 0
+ *   CF.bit7      <- 0
+ *
+ * All other bits are preserved.
+ *
+ * FUN_14024d2ec reads D0 first, then CF, and writes D0 first, then CF.
+ * Preserve that ordering.
+ *
+ * P2.2D4-B1 deliberately leaves cached_page invalid after the raw reg00
+ * window.  Require that state here so the first paged read explicitly
+ * reselects page 0x80 rather than trusting stale selector state.
+ *
+ * Linux is fail-stop on the first transport error.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D4-B2.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_program_page80_baseline_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page)
+{
+	u32 d0_response;
+	u32 cf_response;
+	u8 d0;
+	u8 cf;
+	int ret;
+
+	if (!dev || !cached_page)
+		return -EINVAL;
+
+	if (*cached_page != HD60PRO_PAGED_PAGE_CACHE_INVALID)
+		return -EPERM;
+
+	ret = sc0710_hd60pro_paged_reg_read_locked(
+		dev,
+		cached_page,
+		0x80,
+		0xd0,
+		&d0_response);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_paged_reg_read_locked(
+		dev,
+		cached_page,
+		0x80,
+		0xcf,
+		&cf_response);
+	if (ret)
+		return ret;
+
+	d0 = (u8)d0_response & (u8)~0x03;
+	cf = (u8)cf_response & 0x7f;
+
+	ret = sc0710_hd60pro_paged_reg_write_locked(
+		dev,
+		cached_page,
+		0x80,
+		0xd0,
+		d0);
+	if (ret)
+		return ret;
+
+	return sc0710_hd60pro_paged_reg_write_locked(
+		dev,
+		cached_page,
+		0x80,
+		0xcf,
+		cf);
+}
+
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
