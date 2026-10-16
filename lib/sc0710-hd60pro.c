@@ -1992,6 +1992,140 @@ sc0710_hd60pro_fa1c_apply_control_flags_locked(
 
 
 
+
+/*
+ * P2.2D4-B1: exact raw-register window recovered from FUN_14024d2ec.
+ *
+ * Entry invariant:
+ *
+ *   cached_page == 0x00
+ *
+ * Windows then performs:
+ *
+ *   reg00 = read(reg00) | BIT(7)
+ *   regCE = read(regCE) | BIT(7)
+ *   regCF = (read(regCF) & 0xfa) | 0x02
+ *   reg00 = read(reg00) & ~BIT(7)
+ *
+ * The CE/CF accesses intentionally remain raw.  FUN_14024d2ec mutates
+ * target 0x9c register 0x00 through the same raw transport used for the
+ * page selector while its Windows-side page cache still represents the
+ * previously requested page.
+ *
+ * Linux does not reproduce that stale-cache bookkeeping.  Before the
+ * first raw write to reg00, invalidate cached_page and keep it invalid
+ * throughout this window.  This prevents a later paged accessor from
+ * trusting software state that no longer describes the raw selector
+ * manipulation.
+ *
+ * Do not route reg00 through sc0710_hd60pro_paged_reg_write_locked().
+ * Its reg00 rejection remains intentional.
+ *
+ * Linux is fail-stop on the first transport error.
+ *
+ * Caller must hold state->mailbox_lock.
+ * Definition only: no runtime caller is added in P2.2D4-B1.
+ */
+static int __maybe_unused
+sc0710_hd60pro_fa1c_reg00_bit7_window_locked(
+	struct sc0710_dev *dev,
+	u8 *cached_page)
+{
+	u32 response;
+	u8 value;
+	int ret;
+
+	if (!dev || !cached_page)
+		return -EINVAL;
+
+	/*
+	 * This helper models only the exact position in FUN_14024d2ec:
+	 * page 0 has already been selected by the preceding operations.
+	 * Do not silently introduce an extra selector write here.
+	 */
+	if (*cached_page != 0x00)
+		return -EPERM;
+
+	ret = sc0710_hd60pro_target_reg_read_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		0x00,
+		&response);
+	if (ret)
+		return ret;
+
+	value = (u8)response | BIT(7);
+
+	/*
+	 * A raw reg00 write can make the tracked page stale.  Invalidate
+	 * before attempting the write so even a transport failure leaves
+	 * Linux in the conservative state.
+	 */
+	*cached_page = HD60PRO_PAGED_PAGE_CACHE_INVALID;
+
+	ret = sc0710_hd60pro_target_reg_write_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		0x00,
+		value);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target_reg_read_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		0xce,
+		&response);
+	if (ret)
+		return ret;
+
+	value = (u8)response | BIT(7);
+
+	ret = sc0710_hd60pro_target_reg_write_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		0xce,
+		value);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target_reg_read_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		0xcf,
+		&response);
+	if (ret)
+		return ret;
+
+	value = ((u8)response & 0xfa) | 0x02;
+
+	ret = sc0710_hd60pro_target_reg_write_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		0xcf,
+		value);
+	if (ret)
+		return ret;
+
+	ret = sc0710_hd60pro_target_reg_read_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		0x00,
+		&response);
+	if (ret)
+		return ret;
+
+	value = (u8)response & (u8)~BIT(7);
+
+	return sc0710_hd60pro_target_reg_write_locked(
+		dev,
+		HD60PRO_FRONTEND_PAGED_TARGET,
+		0x00,
+		value);
+}
+
+
+
 static int
 sc0710_hd60pro_take_mailbox_snapshot(
 	struct sc0710_dev *dev,
